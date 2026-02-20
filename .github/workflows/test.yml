@@ -17,15 +17,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install pandas
+        run: pip install pandas pytest
 
-      - name: Run all test*.py files
+      - name: Run all tests
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          exit_code=0
-          while IFS= read -r -d '' file; do
-            echo "▶️ Running $file"
-            python "$file" || exit_code=1
-          done < <(find . -name "test*.py" -print0)
-          exit $exit_code
+          pytest tests/ -v
