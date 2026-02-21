@@ -10,6 +10,7 @@ from .base import TransformState, BaseTransform
 
 from genbench.representations.base import BaseRepresentation, RepresentationState
 from genbench.representations.one_hot.one_hot import OneHotRepresentation
+from genbench.representations.ordinal.ordinal import OrdinalRepresentation
 from genbench.representations.frequency.frequency import FrequencyRepresentation
 
 
@@ -17,6 +18,7 @@ from genbench.representations.frequency.frequency import FrequencyRepresentation
 # Add new representations here when you expand the benchmark.
 _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
     "one_hot_representation": OneHotRepresentation,
+    "ordinal_representation": OrdinalRepresentation,
     "frequency_representation": FrequencyRepresentation
 }
 
