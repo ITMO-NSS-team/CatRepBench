@@ -159,7 +159,17 @@ class OrdinalRepresentation:
         obj.fitted_ = bool(state.params.get("fitted", False))
         obj.categorical_cols_ = list(state.params.get("categorical_cols", []))
         obj.vocab_ = dict(state.params.get("vocab", {}))
-        obj.ordinal_map_ = dict(state.params.get("ordinal_map", {}))
-        obj.inverse_ordinal_map_ = dict(
-            state.params.get("inverse_ordinal_map", {}))
+
+        raw_ordinal_map = dict(state.params.get("ordinal_map", {}))
+        obj.ordinal_map_ = {
+            str(col): {str(cat): int(idx) for cat, idx in dict(col_map).items()}
+            for col, col_map in raw_ordinal_map.items()
+        }
+
+        raw_inverse_ordinal_map = dict(state.params.get("inverse_ordinal_map", {}))
+        # JSON round-trips convert dict keys to strings, so cast ordinal keys back to int.
+        obj.inverse_ordinal_map_ = {
+            str(col): {int(idx): str(cat) for idx, cat in dict(col_map).items()}
+            for col, col_map in raw_inverse_ordinal_map.items()
+        }
         return obj

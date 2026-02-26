@@ -12,6 +12,13 @@ from genbench.representations.base import BaseRepresentation, RepresentationStat
 from genbench.representations.one_hot.one_hot import OneHotRepresentation
 from genbench.representations.ordinal.ordinal import OrdinalRepresentation
 from genbench.representations.frequency.frequency import FrequencyRepresentation
+from genbench.representations.polynomial.polynomial import PolynomialRepresentation
+from genbench.representations.sum.sum import SumRepresentation
+from genbench.representations.helmert.helmert import HelmertRepresentation
+from genbench.representations.backward_difference.backward_difference import (
+    BackwardDifferenceRepresentation,
+)
+from genbench.representations.binary.binary import BinaryRepresentation
 
 
 # Registry for representations usable via this transform.
@@ -19,7 +26,12 @@ from genbench.representations.frequency.frequency import FrequencyRepresentation
 _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
     "one_hot_representation": OneHotRepresentation,
     "ordinal_representation": OrdinalRepresentation,
-    "frequency_representation": FrequencyRepresentation
+    "frequency_representation": FrequencyRepresentation,
+    "polynomial_representation": PolynomialRepresentation,
+    "sum_representation": SumRepresentation,
+    "helmert_representation": HelmertRepresentation,
+    "backward_difference_representation": BackwardDifferenceRepresentation,
+    "binary_representation": BinaryRepresentation,
 }
 
 
