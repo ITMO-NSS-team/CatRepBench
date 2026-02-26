@@ -1,11 +1,13 @@
 import unittest
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import pandas as pd
 from genbench.data.schema import TabularSchema
+from genbench.representations.base import RepresentationState
 from genbench.representations.ordinal.ordinal import OrdinalRepresentation
 
 
@@ -91,6 +93,25 @@ class BaseRepresentationTest(unittest.TestCase):
         state = self.rep.get_state()
         new_rep = self.representation_class.from_state(state)
         self.assertEqual(state.params, new_rep.get_state().params)
+
+    def test_json_roundtrip_preserves_inverse_mapping(self):
+        """JSON serialization must preserve ordinal inverse mapping."""
+        self.rep.fit(self.train_df, self.schema)
+        state = self.rep.get_state()
+        payload = {"name": state.name, "params": state.params}
+        payload_json = json.loads(json.dumps(payload))
+
+        restored = self.representation_class.from_state(
+            RepresentationState(
+                name=payload_json["name"],
+                params=payload_json["params"],
+            )
+        )
+        transformed = self.rep.transform(self.train_df)
+        recovered = restored.inverse_transform(transformed)
+
+        for col in self.schema.categorical_cols:
+            self.assertEqual(recovered[col].tolist(), self.train_df[col].tolist())
 
     # ----- Round‑trip tests (only if invertible) -----
     def test_inverse_transform_roundtrip_on_train(self):
