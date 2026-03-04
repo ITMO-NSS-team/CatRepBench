@@ -9,6 +9,7 @@ from .base import BaseTransform, TransformPipelineState, TransformState
 from genbench.data.schema import TabularSchema
 from .missing import DropMissingRows
 from .continuous import ContinuousStandardScaler
+from .categorical import CategoricalRepresentationTransform
 
 
 # Simple registry for (de)serialization of pipeline components.
@@ -16,6 +17,7 @@ from .continuous import ContinuousStandardScaler
 _TRANSFORM_REGISTRY: Dict[str, Type[BaseTransform]] = {
     "drop_missing_rows": DropMissingRows,
     "continuous_standard_scaler": ContinuousStandardScaler,
+    "categorical_representation_transform": CategoricalRepresentationTransform,
 }
 
 
