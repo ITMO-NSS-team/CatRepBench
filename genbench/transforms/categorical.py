@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
 from typing import Any, Dict, Type
 
 import pandas as pd
@@ -35,6 +36,31 @@ _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
 }
 
 
+def list_registered_representations() -> list[str]:
+    """
+    Return sorted representation ids accepted by CategoricalRepresentationTransform.
+    """
+    return sorted(_REPRESENTATION_REGISTRY.keys())
+
+
+def representation_accepts_kwarg(representation_name: str, kwarg: str) -> bool:
+    """
+    Check whether representation __init__ supports a named keyword argument.
+    """
+    if representation_name not in _REPRESENTATION_REGISTRY:
+        raise KeyError(
+            f"Unknown representation '{representation_name}'. "
+            "Register it in _REPRESENTATION_REGISTRY."
+        )
+
+    rep_cls = _REPRESENTATION_REGISTRY[representation_name]
+    sig = inspect.signature(rep_cls.__init__)
+    params = sig.parameters
+    if kwarg in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 @dataclass
 class CategoricalRepresentationTransform:
     """
@@ -42,7 +68,7 @@ class CategoricalRepresentationTransform:
 
     Why it's a Transform (not used directly in DataModule)?
       - Your current pipeline machinery expects BaseTransform with TransformState,
-        and supports cloning + fold-wise refit. :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+        and supports cloning + fold-wise refit.
 
     Important:
       - This should be placed AFTER missing handling, and usually AFTER continuous scaling,
@@ -74,7 +100,16 @@ class CategoricalRepresentationTransform:
             )
 
         rep_cls = _REPRESENTATION_REGISTRY[self.representation_name]
-        rep = rep_cls(**self.representation_kwargs)  # type: ignore[arg-type]
+        rep_kwargs = dict(self.representation_kwargs)
+        if (
+            "drop_original_categoricals" not in rep_kwargs
+            and representation_accepts_kwarg(self.representation_name, "drop_original_categoricals")
+        ):
+            # Keep source categorical columns by default so DataModule post-transform
+            # validation against original schema remains valid.
+            rep_kwargs["drop_original_categoricals"] = False
+
+        rep = rep_cls(**rep_kwargs)  # type: ignore[arg-type]
         rep.fit(df, schema)
 
         self.repr_ = rep
