@@ -3,6 +3,6 @@ numpy>=1.24
 scikit-learn>=1.3
 scipy>=1.11
 catboost>=1.2
-ctgan>=0.12.0
+ctgan>=0.12.0  # CTGAN and TVAE
 category_encoders>=2.6.0
 pytest>=9.0

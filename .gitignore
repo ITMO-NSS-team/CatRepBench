@@ -4,3 +4,4 @@
 examples/genbench
 genbench/data/__pycache__/__init__.cpython-310.pyc
 *.pyc
+/legacy/
