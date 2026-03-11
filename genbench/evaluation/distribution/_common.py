@@ -22,7 +22,7 @@ def mixed_to_numeric_matrix(df: pd.DataFrame, schema: TabularSchema) -> np.ndarr
     data: List[np.ndarray] = []
     for c in schema.feature_cols:
         col = df[c]
-        if c in schema.categorical_cols or pd.api.types.is_object_dtype(col) or pd.api.types.is_categorical_dtype(col):
+        if c in schema.categorical_cols or pd.api.types.is_object_dtype(col) or isinstance(col.dtype, pd.CategoricalDtype):
             codes, uniques = pd.factorize(col, sort=True)
             codes = codes.astype(float)
             if len(uniques) > 0:
