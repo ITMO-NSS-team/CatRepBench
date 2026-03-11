@@ -10,6 +10,7 @@ from genbench.data.schema import TabularSchema
 from .missing import DropMissingRows
 from .continuous import ContinuousStandardScaler
 from .categorical import CategoricalRepresentationTransform
+from .target import TargetTypePreprocessor
 
 
 # Simple registry for (de)serialization of pipeline components.
@@ -18,6 +19,7 @@ _TRANSFORM_REGISTRY: Dict[str, Type[BaseTransform]] = {
     "drop_missing_rows": DropMissingRows,
     "continuous_standard_scaler": ContinuousStandardScaler,
     "categorical_representation_transform": CategoricalRepresentationTransform,
+    "target_type_preprocessor": TargetTypePreprocessor,
 }
 
 

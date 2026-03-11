@@ -38,7 +38,7 @@ class MarginalKLDivergenceMetric(BaseMetric):
             r = real_feat[c]
             s = synth_feat[c]
 
-            if c in schema.categorical_cols or pd.api.types.is_object_dtype(r) or pd.api.types.is_categorical_dtype(r):
+            if c in schema.categorical_cols or pd.api.types.is_object_dtype(r) or isinstance(r.dtype, pd.CategoricalDtype):
                 categories = sorted(set(r.dropna().unique()).union(set(s.dropna().unique())))
                 if not categories:
                     continue

@@ -151,7 +151,7 @@ class TabularSchema:
             # Accept category/object/bool freely
             if (
                 pd.api.types.is_object_dtype(s)
-                or pd.api.types.is_categorical_dtype(s)
+                or isinstance(s.dtype, pd.CategoricalDtype)
                 or pd.api.types.is_bool_dtype(s)
             ):
                 continue
@@ -205,7 +205,7 @@ class TabularSchema:
         categorical_cols: Optional[Sequence[str]] = None,
         # Heuristics knobs
         treat_bool_as_categorical: bool = True,
-        discrete_max_unique: int = 50,
+        discrete_max_unique: int = 20,
         categorical_numeric_max_unique: int = 200,
         categorical_unique_ratio_id_threshold: float = 0.98,
         drop_unused: bool = False,
@@ -287,7 +287,7 @@ class TabularSchema:
             s = df[c]
 
             # Categorical by dtype
-            if pd.api.types.is_categorical_dtype(s) or pd.api.types.is_object_dtype(s):
+            if isinstance(s.dtype, pd.CategoricalDtype) or pd.api.types.is_object_dtype(s):
                 cat.append(c)
                 continue
 
