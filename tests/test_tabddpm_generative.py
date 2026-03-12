@@ -244,7 +244,7 @@ def test_conditional_sampling_raises():
     model = TabDDPMGenerative()
 
     with pytest.raises(NotImplementedError,
-                       match="does not support conditional"):
+                       match="does not support custom conditions"):
         model.sample(10, conditions=pd.DataFrame({"x": [1]}))
 
 
