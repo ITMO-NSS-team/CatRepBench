@@ -4,13 +4,11 @@ import pickle
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.preprocessing import QuantileTransformer, StandardScaler, \
-    OrdinalEncoder
 
 from genbench.data.schema import TabularSchema
 from genbench.generative.base import BaseGenerative, GenerativeState
@@ -19,8 +17,83 @@ from .modules import MLPDiffusion
 from .utils import update_ema
 
 
+def _infer_feature_types(
+        source_schema: TabularSchema,
+        processed_schema: TabularSchema,
+) -> Dict[str, str]:
+    """
+    Infer feature types for TabDDPM based on source and processed schemas.
+
+    Logic:
+        - Continuous in source -> numerical (Gaussian diffusion)
+        - Discrete in source -> numerical (Gaussian diffusion)
+        - Categorical in source + continuous in processed -> numerical (
+        Gaussian diffusion)
+        - Categorical in source + discrete in processed -> categorical (
+        Multinomial diffusion)
+
+    Parameters
+    ----------
+    source_schema : TabularSchema
+        Schema of the original dataset before preprocessing.
+    processed_schema : TabularSchema
+        Schema of the dataset after preprocessing/encoding.
+
+    Returns
+    -------
+    Dict[str, str]
+        Dictionary mapping column names to their TabDDPM types:
+        'numerical' for Gaussian diffusion, 'categorical' for Multinomial
+        diffusion.
+    """
+    source_cont: Set[str] = set(source_schema.continuous_cols)
+    source_disc: Set[str] = set(source_schema.discrete_cols)
+    source_cat: Set[str] = set(source_schema.categorical_cols)
+
+    processed_cont: Set[str] = set(processed_schema.continuous_cols)
+    processed_disc: Set[str] = set(processed_schema.discrete_cols)
+    processed_cat: Set[str] = set(processed_schema.categorical_cols)
+
+    feature_types: Dict[str, str] = {}
+
+    # All features from processed schema
+    all_features = processed_schema.feature_cols
+
+    for col in all_features:
+        if col in source_cont:
+            # Continuous in source -> numerical
+            feature_types[col] = 'numerical'
+        elif col in source_disc:
+            # Discrete in source -> numerical
+            feature_types[col] = 'numerical'
+        elif col in source_cat:
+            if col in processed_cont:
+                # Categorical -> continuous
+                feature_types[col] = 'numerical'
+            elif col in processed_disc:
+                # Categorical -> discrete
+                # Treat as categorical for Multinomial diffusion
+                feature_types[col] = 'categorical'
+            elif col in processed_cat:
+                # Still categorical
+                feature_types[col] = 'categorical'
+            else:
+                raise ValueError(
+                    f"Column '{col}' from source categorical not found in "
+                    f"processed schema"
+                )
+        else:
+            # Column not in source schema
+            if col in processed_cont or col in processed_disc:
+                feature_types[col] = 'numerical'
+            else:
+                feature_types[col] = 'categorical'
+
+    return feature_types
+
+
 @dataclass
-class TabDdpmGenerative(BaseGenerative):
+class TabDDPMGenerative(BaseGenerative):
     """
     Thin wrapper around TabDDPM to comply with BaseGenerative protocol.
 
@@ -73,82 +146,153 @@ class TabDdpmGenerative(BaseGenerative):
     # fitted artifacts
     model_: Any = None
     diffusion_: Any = None
+    ema_model_: Any = None
     fitted_: bool = False
 
-    # preprocessing transformers
-    num_transform_: Any = None
-    cat_transform_: Any = None
-
-    # data info
+    # data info - feature columns
     num_numerical_features_: int = 0
     num_classes_: np.ndarray = field(default_factory=lambda: np.array([0]))
+    numerical_cols_: List[str] = field(default_factory=list)
+    categorical_cols_: List[str] = field(default_factory=list)
     column_order_: List[str] = field(default_factory=list)
+
+    # target info - for conditional generation
+    num_target_classes_: int = 0  # 0 for regression, >0 for classification
+    is_y_cond_: bool = False
+    target_col_: Optional[str] = None
+    y_train_distribution_: Optional[np.ndarray] = None
+
     loss_history_: List[Dict[str, float]] = field(default_factory=list)
 
     def requires_fit(self) -> bool:
         return True
 
     def is_conditional(self) -> bool:
-        return False
+        return self.is_y_cond_
 
-    def _preprocess_data(self, df: pd.DataFrame,
-                         schema: TabularSchema) -> torch.Tensor:
+    def _infer_target_info(
+            self,
+            df: pd.DataFrame,
+            schema: TabularSchema,
+    ) -> None:
         """
-        Preprocess the data for TabDDPM.
+        Infer target variable info for conditional/unconditional generation.
 
-        - Continuous features: quantile normalization to standard normal
-        - Categorical features: ordinal encoding
-        - Discrete features: kept as is (treated as numerical)
+        Sets:
+            - num_target_classes_: 0 for regression, number of classes for
+            classification
+            - is_y_cond_: whether to use conditional generation
+            - target_col_: name of target column
+            - y_train_distribution_: empirical distribution of y values
         """
-        # Determine column order: continuous + discrete + categorical
-        cont_cols = list(schema.continuous_cols)
-        disc_cols = list(schema.discrete_cols)
-        cat_cols = list(schema.categorical_cols)
+        if schema.target_col is None:
+            # No target column - unconditional generation
+            self.num_target_classes_ = 0
+            self.is_y_cond_ = False
+            self.target_col_ = None
+            self.y_train_distribution_ = None
+            return
 
-        self.column_order_ = cont_cols + disc_cols + cat_cols
-        self.num_numerical_features_ = len(cont_cols) + len(disc_cols)
+        self.target_col_ = schema.target_col
+        y_data = df[schema.target_col]
 
-        # Process numerical features (continuous + discrete)
-        num_cols = cont_cols + disc_cols
-        if num_cols:
-            num_data = df[num_cols].values.astype(np.float32)
+        # Check if target is categorical (classification) or continuous (
+        # regression)
+        if schema.target_col in schema.categorical_cols:
+            # Classification task
+            unique_vals = y_data.dropna().unique()
+            self.num_target_classes_ = len(unique_vals)
+            self.is_y_cond_ = True
 
-            # Fit QuantileTransformer for normalization
-            n_quantiles = min(1000, max(10, len(df) // 30))
-            self.num_transform_ = QuantileTransformer(
-                output_distribution='normal',
-                n_quantiles=n_quantiles,
-                random_state=0,
-            )
-            num_data = self.num_transform_.fit_transform(num_data)
+            # Compute empirical distribution for sampling
+            value_counts = y_data.value_counts().sort_index()
+            self.y_train_distribution_ = value_counts.values.astype(float)
+            self.y_train_distribution_ = (self.y_train_distribution_ /
+                                          self.y_train_distribution_.sum())
+
+        elif schema.target_col in schema.discrete_cols:
+            # Discrete target - treat as classification if few unique values
+            unique_vals = y_data.dropna().unique()
+            if len(unique_vals) <= 20:
+                self.num_target_classes_ = len(unique_vals)
+                self.is_y_cond_ = True
+                value_counts = y_data.value_counts().sort_index()
+                self.y_train_distribution_ = value_counts.values.astype(float)
+                self.y_train_distribution_ = (self.y_train_distribution_ /
+                                              self.y_train_distribution_.sum())
+            else:
+                # Too many unique values - treat as regression (unconditional)
+                self.num_target_classes_ = 0
+                self.is_y_cond_ = False
+                self.y_train_distribution_ = None
+
+        else:
+            # Continuous target - regression (unconditional generation,
+            # y is part of X)
+            self.num_target_classes_ = 0
+            self.is_y_cond_ = False
+            self.y_train_distribution_ = None
+
+    def _prepare_data(
+            self,
+            df: pd.DataFrame,
+            source_schema: TabularSchema,
+            processed_schema: TabularSchema,
+    ) -> torch.Tensor:
+        """
+        Prepare data for TabDDPM.
+
+        Fills class fields based on schema analysis and data, and converts
+        DataFrame to tensor. Data should be already preprocessed.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Preprocessed training data.
+        source_schema : TabularSchema
+            Schema of the original dataset before preprocessing.
+        processed_schema : TabularSchema
+            Schema of the dataset after preprocessing/encoding.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor representation of the data.
+        """
+        feature_types = _infer_feature_types(source_schema, processed_schema)
+
+        # Separate into numerical and categorical based on inferred types
+        self.numerical_cols_ = [
+            col for col in processed_schema.feature_cols
+            if feature_types.get(col) == 'numerical'
+        ]
+        self.categorical_cols_ = [
+            col for col in processed_schema.feature_cols
+            if feature_types.get(col) == 'categorical'
+        ]
+
+        # Column order: numerical first, then categorical
+        self.column_order_ = self.numerical_cols_ + self.categorical_cols_
+        self.num_numerical_features_ = len(self.numerical_cols_)
+
+        # Process numerical features
+        if self.numerical_cols_:
+            num_data = df[self.numerical_cols_].values.astype(np.float32)
         else:
             num_data = np.zeros((len(df), 0), dtype=np.float32)
 
         # Process categorical features
-        if cat_cols:
-            cat_data = df[cat_cols].values.astype(str)
-
-            # Fit OrdinalEncoder
-            self.cat_transform_ = OrdinalEncoder(
-                handle_unknown='use_encoded_value',
-                unknown_value=-1,
-            )
-            cat_data = self.cat_transform_.fit_transform(cat_data)
+        if self.categorical_cols_:
+            cat_data = df[self.categorical_cols_].values.astype(np.int64)
 
             # Compute number of classes for each categorical feature
-            # Handle unknown values (-1) by adding 1 to the max
             num_classes_list = []
-            for i in range(cat_data.shape[1]):
+            for i, col in enumerate(self.categorical_cols_):
                 col_data = cat_data[:, i]
-                # Shift values to be non-negative (handle -1 for unknown)
-                min_val = col_data.min()
-                if min_val < 0:
-                    cat_data[:, i] = col_data - min_val
-                n_classes = int(cat_data[:, i].max()) + 1
+                n_classes = int(col_data.max()) + 1
                 num_classes_list.append(n_classes)
 
             self.num_classes_ = np.array(num_classes_list)
-            cat_data = cat_data.astype(np.int64)
         else:
             cat_data = np.zeros((len(df), 0), dtype=np.int64)
             self.num_classes_ = np.array([0])
@@ -157,47 +301,12 @@ class TabDdpmGenerative(BaseGenerative):
         X = np.hstack([num_data, cat_data])
         return torch.from_numpy(X).float()
 
-    def _postprocess_data(self, X: np.ndarray) -> pd.DataFrame:
-        """
-        Postprocess generated data back to original format.
-        """
-        # Split numerical and categorical features
-        num_data = X[:, :self.num_numerical_features_]
-        cat_data = X[:, self.num_numerical_features_:]
-
-        # Inverse transform numerical features
-        if self.num_transform_ is not None and num_data.shape[1] > 0:
-            num_data = self.num_transform_.inverse_transform(num_data)
-
-        # Inverse transform categorical features
-        if self.cat_transform_ is not None and cat_data.shape[1] > 0:
-            # Round categorical values to nearest integer
-            cat_data = np.round(cat_data).astype(np.int64)
-            # Clip to valid range
-            for i in range(cat_data.shape[1]):
-                cat_data[:, i] = np.clip(cat_data[:, i], 0,
-                                         self.num_classes_[i] - 1)
-            cat_data = self.cat_transform_.inverse_transform(cat_data)
-
-        # Build DataFrame
-        n_num = self.num_numerical_features_
-        n_cat = len(self.num_classes_) if self.num_classes_[0] > 0 else 0
-
-        columns = self.column_order_
-        data = {}
-
-        if n_num > 0:
-            for i, col in enumerate(columns[:n_num]):
-                data[col] = num_data[:, i]
-
-        if n_cat > 0:
-            for i, col in enumerate(columns[n_num:n_num + n_cat]):
-                data[col] = cat_data[:, i]
-
-        return pd.DataFrame(data)
-
-    def fit(self, df: pd.DataFrame,
-            schema: TabularSchema) -> "TabDdpmGenerative":
+    def fit(
+            self,
+            df: pd.DataFrame,
+            schema: TabularSchema,
+            source_schema: Optional[TabularSchema] = None,
+    ) -> "TabDDPMGenerative":
         """
         Fit the TabDDPM model on the provided data.
 
@@ -207,34 +316,47 @@ class TabDdpmGenerative(BaseGenerative):
             Training data.
         schema : TabularSchema
             Schema describing the data types.
+        source_schema : TabularSchema, optional
+            Schema of the original dataset before preprocessing.
+            If not provided, assumes schema is the same as source schema
+            (no preprocessing was applied).
 
         Returns
         -------
-        self : TabDdpmGenerative
+        self : TabDDPMGenerative
             Fitted model instance.
         """
+        if source_schema is None:
+            source_schema = schema
+
+        # Infer target info for conditional/unconditional generation
+        self._infer_target_info(df, schema)
+
         device = torch.device(self.device)
 
-        # Preprocess data
-        X = self._preprocess_data(df, schema)
+        # Prepare data
+        X = self._prepare_data(df, source_schema, schema)
         X = X.to(device)
 
-        # Create dummy labels (for unconditional generation)
-        y = torch.zeros(X.shape[0], dtype=torch.long, device=device)
+        # Prepare labels for conditional generation
+        if self.is_y_cond_ and self.target_col_ is not None:
+            y = df[self.target_col_].values.astype(np.int64)
+            y = torch.from_numpy(y).long().to(device)
+        else:
+            # Unconditional generation - dummy labels
+            y = torch.zeros(X.shape[0], dtype=torch.long, device=device)
 
         # Build model
         d_in = X.shape[1]
 
         # Adjust d_in for one-hot encoding of categorical features
-        d_in_adjusted = self.num_numerical_features_ + int(
-            self.num_classes_.sum())
-        if self.num_classes_[0] == 0:
-            d_in_adjusted = self.num_numerical_features_
+        if self.num_classes_[0] > 0:
+            d_in = self.num_numerical_features_ + int(self.num_classes_.sum())
 
         model_params = {
             'd_in': d_in,
-            'num_classes': 0,  # unconditional
-            'is_y_cond': False,
+            'num_classes': self.num_target_classes_,
+            'is_y_cond': self.is_y_cond_,
             'rtdl_params': {
                 'd_layers': self.d_layers,
                 'dropout': self.dropout,
@@ -287,14 +409,18 @@ class TabDdpmGenerative(BaseGenerative):
 
         for epoch in range(self.num_epochs):
             epoch_losses = []
+            epoch_multi_losses = []
+            epoch_gauss_losses = []
+
             for batch_x, batch_y in dataloader:
                 batch_x = batch_x.to(device)
                 batch_y = batch_y.to(device)
 
                 optimizer.zero_grad()
                 out_dict = {'y': batch_y}
-                loss_multi, loss_gauss = self.diffusion_.mixed_loss(batch_x,
-                                                                    out_dict)
+                loss_multi, loss_gauss = self.diffusion_.mixed_loss(
+                    batch_x, out_dict
+                )
                 loss = loss_multi + loss_gauss
                 loss.backward()
                 optimizer.step()
@@ -306,24 +432,35 @@ class TabDdpmGenerative(BaseGenerative):
                     param_group["lr"] = new_lr
 
                 # Update EMA
-                update_ema(self.ema_model_.parameters(),
-                           self.model_.parameters())
+                update_ema(
+                    self.ema_model_.parameters(),
+                    self.model_.parameters()
+                )
 
+                # Collect losses for averaging
                 epoch_losses.append(loss.item())
+                epoch_multi_losses.append(loss_multi.item())
+                epoch_gauss_losses.append(loss_gauss.item())
                 step += 1
 
+            # Compute epoch averages
             avg_loss = np.mean(epoch_losses)
+            avg_multi = np.mean(epoch_multi_losses)
+            avg_gauss = np.mean(epoch_gauss_losses)
+
             self.loss_history_.append({
                 'epoch': epoch + 1,
                 'loss': avg_loss,
-                'multinomial_loss': loss_multi.item(),
-                'gaussian_loss': loss_gauss.item(),
+                'multinomial_loss': avg_multi,
+                'gaussian_loss': avg_gauss,
             })
 
             if (epoch + 1) % 10 == 0:
                 print(
-                    f"Epoch {epoch + 1}/{self.num_epochs}, Loss: "
-                    f"{avg_loss:.4f}")
+                    f"Epoch {epoch + 1}/{self.num_epochs}, "
+                    f"Loss: {avg_loss:.4f} "
+                    f"(multi: {avg_multi:.4f}, gauss: {avg_gauss:.4f})"
+                )
 
         # Use EMA model for sampling
         self.diffusion_._denoise_fn = self.ema_model_
@@ -332,8 +469,11 @@ class TabDdpmGenerative(BaseGenerative):
 
         return self
 
-    def sample(self, n: int,
-               conditions: Optional[pd.DataFrame] = None) -> pd.DataFrame:
+    def sample(
+            self,
+            n: int,
+            conditions: Optional[pd.DataFrame] = None
+    ) -> pd.DataFrame:
         """
         Generate synthetic samples.
 
@@ -342,7 +482,7 @@ class TabDdpmGenerative(BaseGenerative):
         n : int
             Number of samples to generate.
         conditions : pd.DataFrame, optional
-            Not supported for TabDDPM (unconditional generation).
+            Not supported for TabDDPM (use empirical target distribution).
 
         Returns
         -------
@@ -351,27 +491,78 @@ class TabDdpmGenerative(BaseGenerative):
         """
         if conditions is not None:
             raise NotImplementedError(
-                "TabDdpmGenerative does not support conditional sampling.")
+                "TabDDPMGenerative does not support custom conditions. "
+                "Samples are generated using empirical target distribution."
+            )
         if not self.fitted_ or self.diffusion_ is None:
             raise RuntimeError("Model is not fitted. Call fit() first.")
 
         device = torch.device(self.device)
 
-        # Create dummy class distribution for unconditional sampling
-        y_dist = torch.ones(1, device=device)  # Single class (unconditional)
+        # Prepare target distribution for sampling
+        if self.is_y_cond_ and self.y_train_distribution_ is not None:
+            # Use empirical distribution from training data
+            y_dist = torch.from_numpy(self.y_train_distribution_).float().to(
+                device)
+        else:
+            # Unconditional generation
+            y_dist = torch.ones(1, device=device)
 
         # Sample from diffusion model
         with torch.no_grad():
-            X_gen, _ = self.diffusion_.sample_all(
+            X_gen, y_gen = self.diffusion_.sample_all(
                 num_samples=n,
                 batch_size=min(self.batch_size, n),
                 y_dist=y_dist,
                 ddim=False,
             )
 
-        # Postprocess generated data
-        X_gen_np = X_gen.numpy()
-        return self._postprocess_data(X_gen_np)
+        # Convert to DataFrame
+        X_gen_np = X_gen.cpu().numpy()
+        df = self._build_dataframe(X_gen_np)
+
+        # Add target column if conditional generation
+        if self.is_y_cond_ and self.target_col_ is not None:
+            y_gen_np = y_gen.cpu().numpy()
+            df[self.target_col_] = y_gen_np
+
+        return df
+
+    def _build_dataframe(self, X: np.ndarray) -> pd.DataFrame:
+        """
+        Build DataFrame from generated tensor.
+
+        Parameters
+        ----------
+        X : np.ndarray
+            Generated data array.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with proper column names.
+        """
+        data = {}
+        n_num = self.num_numerical_features_
+        n_cat = len(self.num_classes_) if self.num_classes_[0] > 0 else 0
+
+        # Numerical features
+        if n_num > 0:
+            num_data = X[:, :n_num]
+            for i, col in enumerate(self.column_order_[:n_num]):
+                data[col] = num_data[:, i]
+
+        # Categorical features
+        if n_cat > 0:
+            cat_data = X[:, n_num:n_num + n_cat]
+            # Round categorical values to nearest integer and clip to valid
+            # range
+            cat_data = np.round(cat_data).astype(np.int64)
+            for i, col in enumerate(self.column_order_[n_num:n_num + n_cat]):
+                data[col] = np.clip(cat_data[:, i], 0,
+                                    self.num_classes_[i] - 1)
+
+        return pd.DataFrame(data)
 
     def get_loss_history(self) -> Optional[Dict[str, list]]:
         """
@@ -387,9 +578,12 @@ class TabDdpmGenerative(BaseGenerative):
 
         return {
             'loss': [h['loss'] for h in self.loss_history_],
-            'multinomial_loss': [h['multinomial_loss'] for h in
-                                 self.loss_history_],
-            'gaussian_loss': [h['gaussian_loss'] for h in self.loss_history_],
+            'multinomial_loss': [
+                h['multinomial_loss'] for h in self.loss_history_
+            ],
+            'gaussian_loss': [
+                h['gaussian_loss'] for h in self.loss_history_
+            ],
         }
 
     def get_state(self) -> GenerativeState:
@@ -419,7 +613,7 @@ class TabDdpmGenerative(BaseGenerative):
         )
 
     @classmethod
-    def from_state(cls, state: GenerativeState) -> "TabDdpmGenerative":
+    def from_state(cls, state: GenerativeState) -> "TabDDPMGenerative":
         """
         Create a model instance from a state object.
 
@@ -430,7 +624,7 @@ class TabDdpmGenerative(BaseGenerative):
 
         Returns
         -------
-        TabDdpmGenerative
+        TabDDPMGenerative
             New model instance with restored parameters.
         """
         params = state.params or {}
@@ -445,8 +639,10 @@ class TabDdpmGenerative(BaseGenerative):
             dropout=params.get("dropout", 0.0),
             scheduler=params.get("scheduler", "cosine"),
             gaussian_loss_type=params.get("gaussian_loss_type", "mse"),
-            device=params.get("device",
-                              "cuda" if torch.cuda.is_available() else "cpu"),
+            device=params.get(
+                "device",
+                "cuda" if torch.cuda.is_available() else "cpu"
+            ),
         )
 
     def save_artifacts(self, path: Path) -> None:
@@ -477,15 +673,19 @@ class TabDdpmGenerative(BaseGenerative):
                 path / "model_ema.pt"
             )
 
-        # Save preprocessing transformers and other artifacts
+        # Save metadata
         with open(path / "tabddpm_artifacts.pkl", "wb") as f:
             pickle.dump(
                 {
-                    "num_transform": self.num_transform_,
-                    "cat_transform": self.cat_transform_,
                     "num_numerical_features": self.num_numerical_features_,
                     "num_classes": self.num_classes_,
+                    "numerical_cols": self.numerical_cols_,
+                    "categorical_cols": self.categorical_cols_,
                     "column_order": self.column_order_,
+                    "num_target_classes": self.num_target_classes_,
+                    "is_y_cond": self.is_y_cond_,
+                    "target_col": self.target_col_,
+                    "y_train_distribution": self.y_train_distribution_,
                     "loss_history": self.loss_history_,
                     "fitted": self.fitted_,
                 },
@@ -493,7 +693,7 @@ class TabDdpmGenerative(BaseGenerative):
             )
 
     @classmethod
-    def load_artifacts(cls, path: Path) -> "TabDdpmGenerative":
+    def load_artifacts(cls, path: Path) -> "TabDDPMGenerative":
         """
         Load model artifacts from disk.
 
@@ -504,26 +704,31 @@ class TabDdpmGenerative(BaseGenerative):
 
         Returns
         -------
-        TabDdpmGenerative
+        TabDDPMGenerative
             Model instance with loaded artifacts.
         """
         path = path.resolve()
 
-        # Load preprocessing artifacts
+        # Load metadata
         artifacts_path = path / "tabddpm_artifacts.pkl"
         if not artifacts_path.exists():
             raise FileNotFoundError(
-                f"tabddpm_artifacts.pkl not found in {path}")
+                f"tabddpm_artifacts.pkl not found in {path}"
+            )
 
         with open(artifacts_path, "rb") as f:
             payload = pickle.load(f)
 
         obj = cls()
-        obj.num_transform_ = payload.get("num_transform")
-        obj.cat_transform_ = payload.get("cat_transform")
         obj.num_numerical_features_ = payload.get("num_numerical_features", 0)
         obj.num_classes_ = payload.get("num_classes", np.array([0]))
+        obj.numerical_cols_ = payload.get("numerical_cols", [])
+        obj.categorical_cols_ = payload.get("categorical_cols", [])
         obj.column_order_ = payload.get("column_order", [])
+        obj.num_target_classes_ = payload.get("num_target_classes", 0)
+        obj.is_y_cond_ = payload.get("is_y_cond", False)
+        obj.target_col_ = payload.get("target_col")
+        obj.y_train_distribution_ = payload.get("y_train_distribution")
         obj.loss_history_ = payload.get("loss_history", [])
         obj.fitted_ = payload.get("fitted", False)
 
@@ -541,8 +746,8 @@ class TabDdpmGenerative(BaseGenerative):
 
             model_params = {
                 'd_in': d_in,
-                'num_classes': 0,
-                'is_y_cond': False,
+                'num_classes': obj.num_target_classes_,
+                'is_y_cond': obj.is_y_cond_,
                 'rtdl_params': {
                     'd_layers': obj.d_layers,
                     'dropout': obj.dropout,
@@ -552,7 +757,8 @@ class TabDdpmGenerative(BaseGenerative):
 
             obj.model_ = MLPDiffusion(**model_params)
             obj.model_.load_state_dict(
-                torch.load(model_path, map_location=device))
+                torch.load(model_path, map_location=device)
+            )
             obj.model_.to(device)
 
             # Rebuild diffusion model

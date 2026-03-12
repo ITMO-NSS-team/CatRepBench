@@ -1,3 +1,5 @@
+# Code sourced from https://github.com/yandex-research/tab-ddpm
+
 import torch
 import torch.nn.functional as F
 import numpy as np

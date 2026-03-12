@@ -4,7 +4,7 @@ from .modules import MLPDiffusion, ResNetDiffusion
 from .utils import FoundNANsError
 
 __all__ = [
-    "TabDdpmGenerative",
+    "TabDDPMGenerative",
     "GaussianMultinomialDiffusion",
     "MLPDiffusion",
     "ResNetDiffusion",

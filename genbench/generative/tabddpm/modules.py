@@ -1,3 +1,5 @@
+# Code sourced from https://github.com/yandex-research/tab-ddpm
+
 import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, \
     cast
