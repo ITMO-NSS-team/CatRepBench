@@ -1,4 +1,4 @@
-from .tabddpm import TabDdpmGenerative
+from .tabddpm import TabDDPMGenerative
 from .diffusion import GaussianMultinomialDiffusion
 from .modules import MLPDiffusion, ResNetDiffusion
 from .utils import FoundNANsError
