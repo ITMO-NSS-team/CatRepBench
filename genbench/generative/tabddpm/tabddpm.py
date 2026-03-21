@@ -156,11 +156,8 @@ class TabDDPMGenerative(BaseGenerative):
     categorical_cols_: List[str] = field(default_factory=list)
     column_order_: List[str] = field(default_factory=list)
 
-    # target info - for conditional generation
-    num_target_classes_: int = 0  # 0 for regression, >0 for classification
-    is_y_cond_: bool = False
+    # target info - target is always modeled as part of X
     target_col_: Optional[str] = None
-    y_train_distribution_: Optional[np.ndarray] = None
 
     loss_history_: List[Dict[str, float]] = field(default_factory=list)
 
@@ -168,70 +165,7 @@ class TabDDPMGenerative(BaseGenerative):
         return True
 
     def is_conditional(self) -> bool:
-        return self.is_y_cond_
-
-    def _infer_target_info(
-            self,
-            df: pd.DataFrame,
-            schema: TabularSchema,
-    ) -> None:
-        """
-        Infer target variable info for conditional/unconditional generation.
-
-        Sets:
-            - num_target_classes_: 0 for regression, number of classes for
-            classification
-            - is_y_cond_: whether to use conditional generation
-            - target_col_: name of target column
-            - y_train_distribution_: empirical distribution of y values
-        """
-        if schema.target_col is None:
-            # No target column - unconditional generation
-            self.num_target_classes_ = 0
-            self.is_y_cond_ = False
-            self.target_col_ = None
-            self.y_train_distribution_ = None
-            return
-
-        self.target_col_ = schema.target_col
-        y_data = df[schema.target_col]
-
-        # Check if target is categorical (classification) or continuous (
-        # regression)
-        if schema.target_col in schema.categorical_cols:
-            # Classification task
-            unique_vals = y_data.dropna().unique()
-            self.num_target_classes_ = len(unique_vals)
-            self.is_y_cond_ = True
-
-            # Compute empirical distribution for sampling
-            value_counts = y_data.value_counts().sort_index()
-            self.y_train_distribution_ = value_counts.values.astype(float)
-            self.y_train_distribution_ = (self.y_train_distribution_ /
-                                          self.y_train_distribution_.sum())
-
-        elif schema.target_col in schema.discrete_cols:
-            # Discrete target - treat as classification if few unique values
-            unique_vals = y_data.dropna().unique()
-            if len(unique_vals) <= 20:
-                self.num_target_classes_ = len(unique_vals)
-                self.is_y_cond_ = True
-                value_counts = y_data.value_counts().sort_index()
-                self.y_train_distribution_ = value_counts.values.astype(float)
-                self.y_train_distribution_ = (self.y_train_distribution_ /
-                                              self.y_train_distribution_.sum())
-            else:
-                # Too many unique values - treat as regression (unconditional)
-                self.num_target_classes_ = 0
-                self.is_y_cond_ = False
-                self.y_train_distribution_ = None
-
-        else:
-            # Continuous target - regression (unconditional generation,
-            # y is part of X)
-            self.num_target_classes_ = 0
-            self.is_y_cond_ = False
-            self.y_train_distribution_ = None
+        return False
 
     def _prepare_data(
             self,
@@ -244,6 +178,8 @@ class TabDDPMGenerative(BaseGenerative):
 
         Fills class fields based on schema analysis and data, and converts
         DataFrame to tensor. Data should be already preprocessed.
+
+        Target variable is modeled together with other features.
 
         Parameters
         ----------
@@ -260,6 +196,9 @@ class TabDDPMGenerative(BaseGenerative):
             Tensor representation of the data.
         """
         feature_types = _infer_feature_types(source_schema, processed_schema)
+
+        # Store target column info
+        self.target_col_ = processed_schema.target_col
 
         # Separate into numerical and categorical based on inferred types
         self.numerical_cols_ = [
@@ -329,22 +268,11 @@ class TabDDPMGenerative(BaseGenerative):
         if source_schema is None:
             source_schema = schema
 
-        # Infer target info for conditional/unconditional generation
-        self._infer_target_info(df, schema)
-
         device = torch.device(self.device)
 
         # Prepare data
         X = self._prepare_data(df, source_schema, schema)
         X = X.to(device)
-
-        # Prepare labels for conditional generation
-        if self.is_y_cond_ and self.target_col_ is not None:
-            y = df[self.target_col_].values.astype(np.int64)
-            y = torch.from_numpy(y).long().to(device)
-        else:
-            # Unconditional generation - dummy labels
-            y = torch.zeros(X.shape[0], dtype=torch.long, device=device)
 
         # Build model
         d_in = X.shape[1]
@@ -355,8 +283,8 @@ class TabDDPMGenerative(BaseGenerative):
 
         model_params = {
             'd_in': d_in,
-            'num_classes': self.num_target_classes_,
-            'is_y_cond': self.is_y_cond_,
+            'num_classes': 0,  # Always 0 - target modeled with features
+            'is_y_cond': False,  # Always False - unconditional on y
             'rtdl_params': {
                 'd_layers': self.d_layers,
                 'dropout': self.dropout,
@@ -374,6 +302,7 @@ class TabDDPMGenerative(BaseGenerative):
             denoise_fn=self.model_,
             num_timesteps=self.num_timesteps,
             gaussian_loss_type=self.gaussian_loss_type,
+            multinomial_loss_type='vb_stochastic',
             scheduler=self.scheduler,
             device=device,
         )
@@ -399,7 +328,7 @@ class TabDDPMGenerative(BaseGenerative):
 
         # Create dataloader
         from torch.utils.data import TensorDataset, DataLoader
-        dataset = TensorDataset(X, y)
+        dataset = TensorDataset(X)
         dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -412,12 +341,14 @@ class TabDDPMGenerative(BaseGenerative):
             epoch_multi_losses = []
             epoch_gauss_losses = []
 
-            for batch_x, batch_y in dataloader:
+            for (batch_x,) in dataloader:
                 batch_x = batch_x.to(device)
-                batch_y = batch_y.to(device)
 
                 optimizer.zero_grad()
-                out_dict = {'y': batch_y}
+                # Empty out_dict since target is in X (regression mode)
+                out_dict = {
+                    'y': torch.zeros(batch_x.shape[0], dtype=torch.long,
+                                     device=device)}
                 loss_multi, loss_gauss = self.diffusion_.mixed_loss(
                     batch_x, out_dict
                 )
@@ -469,11 +400,8 @@ class TabDDPMGenerative(BaseGenerative):
 
         return self
 
-    def sample(
-            self,
-            n: int,
-            conditions: Optional[pd.DataFrame] = None
-    ) -> pd.DataFrame:
+    def sample(self, n: int,
+               conditions: Optional[pd.DataFrame] = None) -> pd.DataFrame:
         """
         Generate synthetic samples.
 
@@ -482,35 +410,24 @@ class TabDDPMGenerative(BaseGenerative):
         n : int
             Number of samples to generate.
         conditions : pd.DataFrame, optional
-            Not supported for TabDDPM (use empirical target distribution).
+        Ignored. Model generates all features including target jointly.
 
         Returns
         -------
         pd.DataFrame
-            Generated synthetic data.
+            Generated synthetic data with target column if present.
         """
-        if conditions is not None:
-            raise NotImplementedError(
-                "TabDDPMGenerative does not support custom conditions. "
-                "Samples are generated using empirical target distribution."
-            )
         if not self.fitted_ or self.diffusion_ is None:
             raise RuntimeError("Model is not fitted. Call fit() first.")
 
         device = torch.device(self.device)
 
-        # Prepare target distribution for sampling
-        if self.is_y_cond_ and self.y_train_distribution_ is not None:
-            # Use empirical distribution from training data
-            y_dist = torch.from_numpy(self.y_train_distribution_).float().to(
-                device)
-        else:
-            # Unconditional generation
-            y_dist = torch.ones(1, device=device)
+        # Dummy y_dist for unconditional sampling
+        y_dist = torch.ones(1, device=device)
 
         # Sample from diffusion model
         with torch.no_grad():
-            X_gen, y_gen = self.diffusion_.sample_all(
+            X_gen, _ = self.diffusion_.sample_all(
                 num_samples=n,
                 batch_size=min(self.batch_size, n),
                 y_dist=y_dist,
@@ -520,11 +437,6 @@ class TabDDPMGenerative(BaseGenerative):
         # Convert to DataFrame
         X_gen_np = X_gen.cpu().numpy()
         df = self._build_dataframe(X_gen_np)
-
-        # Add target column if conditional generation
-        if self.is_y_cond_ and self.target_col_ is not None:
-            y_gen_np = y_gen.cpu().numpy()
-            df[self.target_col_] = y_gen_np
 
         return df
 
@@ -682,10 +594,7 @@ class TabDDPMGenerative(BaseGenerative):
                     "numerical_cols": self.numerical_cols_,
                     "categorical_cols": self.categorical_cols_,
                     "column_order": self.column_order_,
-                    "num_target_classes": self.num_target_classes_,
-                    "is_y_cond": self.is_y_cond_,
                     "target_col": self.target_col_,
-                    "y_train_distribution": self.y_train_distribution_,
                     "loss_history": self.loss_history_,
                     "fitted": self.fitted_,
                 },
@@ -725,10 +634,7 @@ class TabDDPMGenerative(BaseGenerative):
         obj.numerical_cols_ = payload.get("numerical_cols", [])
         obj.categorical_cols_ = payload.get("categorical_cols", [])
         obj.column_order_ = payload.get("column_order", [])
-        obj.num_target_classes_ = payload.get("num_target_classes", 0)
-        obj.is_y_cond_ = payload.get("is_y_cond", False)
         obj.target_col_ = payload.get("target_col")
-        obj.y_train_distribution_ = payload.get("y_train_distribution")
         obj.loss_history_ = payload.get("loss_history", [])
         obj.fitted_ = payload.get("fitted", False)
 
@@ -746,8 +652,8 @@ class TabDDPMGenerative(BaseGenerative):
 
             model_params = {
                 'd_in': d_in,
-                'num_classes': obj.num_target_classes_,
-                'is_y_cond': obj.is_y_cond_,
+                'num_classes': 0,  # Always 0
+                'is_y_cond': False,  # Always False
                 'rtdl_params': {
                     'd_layers': obj.d_layers,
                     'dropout': obj.dropout,

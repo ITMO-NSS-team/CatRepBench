@@ -239,13 +239,32 @@ def test_sample_without_fit_raises():
         model.sample(10)
 
 
-def test_conditional_sampling_raises():
-    """Test that conditional sampling raises NotImplementedError."""
-    model = TabDDPMGenerative()
+@patch('genbench.generative.tabddpm.tabddpm.MLPDiffusion', DummyMLPDiffusion)
+@patch('genbench.generative.tabddpm.tabddpm.GaussianMultinomialDiffusion',
+       DummyDiffusion)
+def test_sample_conditions_ignored(minimal_data):
+    """Test that conditions parameter is ignored (unconditional model)."""
+    df, schema = minimal_data
 
-    with pytest.raises(NotImplementedError,
-                       match="does not support custom conditions"):
-        model.sample(10, conditions=pd.DataFrame({"x": [1]}))
+    model = TabDDPMGenerative(
+        num_epochs=1,
+        batch_size=2,
+        device='cpu',
+    )
+
+    model.fit(df, schema)
+
+    # Mock the diffusion model for sampling
+    model.diffusion_ = DummyDiffusion(
+        num_classes=model.num_classes_,
+        num_numerical_features=model.num_numerical_features_,
+    )
+
+    # Sample with conditions - should be ignored, not raise error
+    samples = model.sample(5, conditions=pd.DataFrame({"x": [1]}))
+
+    assert isinstance(samples, pd.DataFrame)
+    assert len(samples) == 5
 
 
 @patch('genbench.generative.tabddpm.tabddpm.MLPDiffusion', DummyMLPDiffusion)
