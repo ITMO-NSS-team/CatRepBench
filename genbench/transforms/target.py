@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from genbench.data.schema import TabularSchema
+from genbench.data.type_inference import infer_feature_type
 from .base import TransformState
 
 
@@ -17,14 +18,21 @@ def infer_is_regression_target(
     discrete_unique_threshold: int = 20,
 ) -> bool:
     """
-    Infer regression/classification mode for target by task hint + target properties.
+    Infer regression/classification mode for target by task hint + target type.
     """
     if task_type is not None:
         normalized = task_type.strip().lower()
         if normalized not in {"classification", "regression"}:
             raise ValueError("task_type must be 'classification' or 'regression'.")
         return normalized == "regression"
-    return bool(pd.api.types.is_numeric_dtype(y) and y.nunique(dropna=True) > discrete_unique_threshold)
+    return (
+        infer_feature_type(
+            y,
+            discrete_max_unique=discrete_unique_threshold,
+            treat_bool_as_categorical=True,
+        )
+        == "continuous"
+    )
 
 
 def _safe_str(x: object) -> str:
@@ -39,8 +47,9 @@ def _safe_str(x: object) -> str:
 class TargetTypePreprocessor:
     """
     Train-only target preprocessing:
-    - classification + categorical y -> label encoding
-    - regression + numeric y -> standard scaling
+    - continuous y -> standard scaling
+    - discrete y -> no encoding
+    - categorical y -> label encoding
     """
 
     name: str = "target_type_preprocessor"

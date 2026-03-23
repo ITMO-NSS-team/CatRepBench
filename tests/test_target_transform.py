@@ -88,3 +88,29 @@ def test_infer_is_regression_target_uses_threshold_20():
 
     assert infer_is_regression_target(y_small, discrete_unique_threshold=20) is False
     assert infer_is_regression_target(y_large, discrete_unique_threshold=20) is True
+
+
+def test_infer_is_regression_target_treats_fractional_float_as_continuous():
+    y = pd.Series([0.1, 0.2, 0.1, 0.2, 0.3])
+
+    assert infer_is_regression_target(y, discrete_unique_threshold=20) is True
+
+
+def test_target_preprocessor_leaves_discrete_numeric_target_unencoded():
+    df = pd.DataFrame(
+        {
+            "x_cont": [0.1, 0.2, 0.3, 0.4],
+            "x_disc": [1, 2, 1, 2],
+            "x_cat": ["a", "b", "a", "b"],
+            "target": [0, 1, 0, 1],
+        }
+    )
+    schema = _schema()
+    tr = TargetTypePreprocessor(task_type=None)
+
+    tr.fit(df, schema)
+    out = tr.transform(df)
+
+    assert tr.did_scale_ is False
+    assert tr.did_encode_ is False
+    pd.testing.assert_series_equal(out["target"], df["target"], check_names=False)
