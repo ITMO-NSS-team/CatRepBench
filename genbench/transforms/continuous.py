@@ -30,7 +30,11 @@ class ContinuousStandardScaler:
     def fit(self, df: pd.DataFrame, schema: TabularSchema) -> "ContinuousStandardScaler":
         cols = list(schema.continuous_cols)
         if not cols:
-            raise ValueError("No continuous columns in schema.")
+            self.continuous_cols_ = []
+            self.means_ = {}
+            self.stds_ = {}
+            self.fitted_ = True
+            return self
 
         x = df[cols].astype(float)
         means = x.mean(axis=0, skipna=True)

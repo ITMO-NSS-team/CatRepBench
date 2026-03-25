@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
+from .type_inference import infer_feature_type, is_categorical_like_dtype
+
 
 @dataclass(frozen=True)
 class TabularSchema:
@@ -14,7 +16,7 @@ class TabularSchema:
     This schema supports three feature types:
       - continuous: float-like real-valued features
       - discrete: integer-valued (count/ordered) features
-      - categorical: nominal categories (object/category/bool or explicitly declared)
+      - categorical: nominal categories (object/category/string/bool or explicitly declared)
 
     Notes / design goals:
       - This class is *only* about column typing/validation and safe inference.
@@ -142,18 +144,13 @@ class TabularSchema:
                 f"Bad discrete columns: {disc_bad}"
             )
 
-        # Categorical: allow object/category/bool OR numeric (if user intentionally uses numeric category codes).
+        # Categorical: allow object/category/string/bool OR numeric (if user intentionally uses numeric category codes).
         # We do not hard-fail numeric categoricals (common in datasets), but we ensure they are not all unique IDs.
         # The "all unique" check is a common pitfall, but we only warn via ValueError with guidance.
         cat_suspicious: List[Tuple[str, float]] = []
         for c in self.categorical_cols:
             s = df[c]
-            # Accept category/object/bool freely
-            if (
-                pd.api.types.is_object_dtype(s)
-                or pd.api.types.is_categorical_dtype(s)
-                or pd.api.types.is_bool_dtype(s)
-            ):
+            if is_categorical_like_dtype(s):
                 continue
 
             # Numeric categorical codes are allowed; detect "looks like an ID" (very high uniqueness).
@@ -169,7 +166,7 @@ class TabularSchema:
             # Otherwise unknown dtype
             raise TypeError(
                 f"Categorical column '{c}' has unsupported dtype '{s.dtype}'. "
-                "Use object/category/bool or numeric codes."
+                "Use object/category/string/bool or numeric codes."
             )
 
         if cat_suspicious:
@@ -205,7 +202,7 @@ class TabularSchema:
         categorical_cols: Optional[Sequence[str]] = None,
         # Heuristics knobs
         treat_bool_as_categorical: bool = True,
-        discrete_max_unique: int = 50,
+        discrete_max_unique: int = 20,
         categorical_numeric_max_unique: int = 200,
         categorical_unique_ratio_id_threshold: float = 0.98,
         drop_unused: bool = False,
@@ -216,8 +213,8 @@ class TabularSchema:
         Strategy (when explicit cols are not provided):
           - Start from feature_cols (or all non-(id/target) columns).
           - Assign:
-              * categorical: object/category; bool optionally
-              * discrete: integer dtypes OR "few unique integer-like numeric"
+              * categorical: object/category/string; bool optionally
+              * discrete: integer-valued numeric with nunique < discrete_max_unique
               * continuous: remaining numeric
           - Numeric columns with very high uniqueness can be treated as continuous by default,
             but if explicitly specified as categorical we'll allow (and validate).
@@ -231,8 +228,7 @@ class TabularSchema:
         treat_bool_as_categorical:
             If True, bool columns are inferred as categorical (recommended).
         discrete_max_unique:
-            For integer/integer-like columns: if nunique <= this, infer as discrete; otherwise treat as continuous-like.
-            (Useful when integer columns are actually continuous measured values.)
+            For integer/integer-like columns: if nunique < this, infer as discrete; otherwise treat as continuous.
         categorical_numeric_max_unique:
             Numeric columns with nunique <= this can be inferred as categorical *only if* explicitly requested
             OR if they are non-float integer-like but not too many unique values.
@@ -287,53 +283,24 @@ class TabularSchema:
             s = df[c]
 
             # Categorical by dtype
-            if pd.api.types.is_categorical_dtype(s) or pd.api.types.is_object_dtype(s):
+            if isinstance(s.dtype, pd.CategoricalDtype) or pd.api.types.is_object_dtype(s):
                 cat.append(c)
                 continue
 
-            if pd.api.types.is_bool_dtype(s):
-                if treat_bool_as_categorical:
-                    cat.append(c)
-                else:
-                    disc.append(c)  # alternative: treat as discrete {0,1}
-                continue
-
-            # Numeric types
-            if pd.api.types.is_numeric_dtype(s):
-                sn = s.dropna()
-                if sn.empty:
-                    # If all missing, default to continuous (won't matter; downstream missing handler should drop/impute)
-                    cont.append(c)
-                    continue
-
-                nunique = int(sn.nunique())
-                uniq_ratio = float(nunique) / float(len(sn))
-
-                # Integer dtype: could be discrete or continuous-like measurement stored as int.
-                if pd.api.types.is_integer_dtype(s):
-                    if nunique <= discrete_max_unique:
-                        disc.append(c)
-                    else:
-                        # High unique integer columns often behave like continuous
-                        cont.append(c)
-                    continue
-
-                # Non-integer numeric: check if integer-valued
-                is_integer_valued = (sn.astype("float64") % 1 == 0).all()
-
-                if is_integer_valued:
-                    # integer-like float column (e.g., 1.0, 2.0, ...)
-                    if nunique <= discrete_max_unique:
-                        disc.append(c)
-                    else:
-                        cont.append(c)
-                    continue
-
-                # True float-valued -> continuous
+            feature_type = infer_feature_type(
+                s,
+                discrete_max_unique=discrete_max_unique,
+                treat_bool_as_categorical=treat_bool_as_categorical,
+            )
+            if feature_type == "continuous":
                 cont.append(c)
                 continue
-
-            # Fallback: unknown dtype -> categorical (but it's safer to require explicit handling)
+            if feature_type == "discrete":
+                disc.append(c)
+                continue
+            if feature_type == "categorical":
+                cat.append(c)
+                continue
             raise TypeError(
                 f"Cannot infer type for column '{c}' with dtype '{s.dtype}'. "
                 "Please cast it or specify categorical_cols/discrete_cols/continuous_cols explicitly."

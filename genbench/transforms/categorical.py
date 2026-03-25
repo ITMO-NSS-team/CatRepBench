@@ -35,6 +35,11 @@ _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
 }
 
 
+def list_registered_representations() -> list[str]:
+    """
+    Return sorted representation ids accepted by CategoricalRepresentationTransform.
+    """
+    return sorted(_REPRESENTATION_REGISTRY.keys())
 @dataclass
 class CategoricalRepresentationTransform:
     """
@@ -42,7 +47,7 @@ class CategoricalRepresentationTransform:
 
     Why it's a Transform (not used directly in DataModule)?
       - Your current pipeline machinery expects BaseTransform with TransformState,
-        and supports cloning + fold-wise refit. :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+        and supports cloning + fold-wise refit.
 
     Important:
       - This should be placed AFTER missing handling, and usually AFTER continuous scaling,
