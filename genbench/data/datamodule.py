@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 import pandas as pd
 
 from .schema import TabularSchema
+from .type_inference import is_categorical_like_dtype
 from .splits import (
     SplitConfigKFold,
     SplitConfigHoldout,
@@ -42,7 +43,7 @@ class TabularDataModule:
 
     Key sb-tabular design principles preserved:
       1) Schema validates input columns.
-      2) "Global" missing handling happens BEFORE any split (so splits are stable).
+      2) All transforms, including missing handling, are applied split-wise.
       3) Fold-wise transforms are FIT on the corresponding train subset only, then
          applied to train/test (or train/val) subsets.
 
@@ -72,13 +73,6 @@ class TabularDataModule:
 
         df0 = df.copy()
 
-        # Apply GLOBAL missing handling *before* splits.
-        # We intentionally do NOT apply scaling globally (it must be fit on train per split).
-        # Therefore, if transforms is a pipeline, it should support "pre-fit transform"
-        # behavior (e.g., DropMissingRows) without needing fit.
-        if self.transforms is not None:
-            df0 = self._apply_global_transforms(df0)
-
         if reset_index:
             df0 = df0.reset_index(drop=True)
 
@@ -103,6 +97,7 @@ class TabularDataModule:
         fold = self._kfold_splits[fold_id]
         train_raw = self.df_clean.iloc[fold.train_idx].copy()
         test_raw = self.df_clean.iloc[fold.test_idx].copy()
+        self._validate_no_unseen_categories(train_raw, test_raw, context=f"fold={fold_id} test")
 
         if self.transforms is None:
             return FoldData(fold_id=fold_id, train=train_raw, test=test_raw, transforms=None)
@@ -112,10 +107,8 @@ class TabularDataModule:
         train = pipe.transform(train_raw)
         test = pipe.transform(test_raw)
 
-        # Optional safety re-validation (post-transform)
-        # We do not enforce dtype checks here because transforms may cast/normalize categories, etc.
         self._validate_post_transform(train, context=f"fold={fold_id} train")
-        self._validate_post_transform(test, context=f"fold={fold_id} test")
+        self._validate_post_transform(test, context=f"fold={fold_id} test", reference_cols=list(train.columns))
 
         return FoldData(fold_id=fold_id, train=train, test=test, transforms=pipe)
 
@@ -136,6 +129,7 @@ class TabularDataModule:
         sp = self._holdout_split
         train_raw = self.df_clean.iloc[sp.train_idx].copy()
         val_raw = self.df_clean.iloc[sp.val_idx].copy()
+        self._validate_no_unseen_categories(train_raw, val_raw, context="holdout val")
 
         if self.transforms is None:
             return HoldoutData(train=train_raw, val=val_raw, transforms=None)
@@ -146,59 +140,59 @@ class TabularDataModule:
         val = pipe.transform(val_raw)
 
         self._validate_post_transform(train, context="holdout train")
-        self._validate_post_transform(val, context="holdout val")
+        self._validate_post_transform(val, context="holdout val", reference_cols=list(train.columns))
 
         return HoldoutData(train=train, val=val, transforms=pipe)
 
     # --------- Optional convenience ---------
 
     def get_clean_df(self) -> pd.DataFrame:
-        """Return the globally cleaned DataFrame (after global missing handling, before split-wise scaling)."""
+        """Return the validated DataFrame after optional index reset, before split-wise transforms."""
         return self.df_clean.copy()
 
     # --------- Internals ---------
 
-    def _apply_global_transforms(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _validate_post_transform(
+        self,
+        df: pd.DataFrame,
+        context: str,
+        reference_cols: Optional[list[str]] = None,
+    ) -> None:
         """
-        Apply only those transforms that are safe to apply globally (e.g., dropping rows with NaNs).
-
-        Behavior:
-          - If transforms has a method `transform_global`, we call it (preferred).
-          - Else we try `transform` directly. If it fails due to "not fitted", we attempt
-            a *best-effort* fit+transform on the full df, but we strongly recommend pipelines
-            to support pre-fit global missing handling to avoid accidental scaling leakage.
-
-        This mirrors the original sb-tabular approach but adds a safer extension point.
+        Lightweight checks after split-wise transforms.
         """
-        t = self.transforms
-        assert t is not None
+        required_cols = [c for c in (self.schema.id_col, self.schema.target_col) if c is not None]
+        missing_required = [c for c in required_cols if c not in df.columns]
+        if missing_required:
+            raise ValueError(f"[{context}] Transforms removed required columns: {missing_required}")
 
-        # Preferred explicit hook
-        if hasattr(t, "transform_global"):
-            df0 = t.transform_global(df, self.schema)  # type: ignore[attr-defined]
-            return df0
+        if reference_cols is not None:
+            missing = [c for c in reference_cols if c not in df.columns]
+            extra = [c for c in df.columns if c not in reference_cols]
+            if missing or extra:
+                raise ValueError(
+                    f"[{context}] Transformed columns differ from train columns. "
+                    f"Missing: {missing}. Extra: {extra}."
+                )
 
-        # Backward-compatible behavior
-        try:
-            return t.transform(df)
-        except Exception:
-            # Fallback: fit+transform on full df (may leak for scalers).
-            # We keep this to preserve sb-tabular robustness, but you should avoid this
-            # by ensuring your pipeline can drop missing without fitting.
-            t.fit(df, self.schema)
-            return t.transform(df)
+    def _validate_no_unseen_categories(self, train_df: pd.DataFrame, other_df: pd.DataFrame, context: str) -> None:
+        categorical_cols = list(self.schema.categorical_cols)
+        if self.schema.target_col is not None and self.schema.target_col in train_df.columns:
+            if is_categorical_like_dtype(train_df[self.schema.target_col]):
+                categorical_cols.append(self.schema.target_col)
 
-    def _validate_post_transform(self, df: pd.DataFrame, context: str) -> None:
-        """
-        Lightweight checks after split-wise transforms:
-          - required columns still exist
-          - row count consistent
-        We intentionally do not enforce strict dtypes here because
-        transforms may cast categories to 'category', normalize strings, etc.
-        """
-        missing = [c for c in self.schema.all_cols if c not in df.columns]
-        if missing:
-            raise ValueError(f"[{context}] Transforms removed required columns: {missing}")
+        for col in categorical_cols:
+            if col not in train_df.columns or col not in other_df.columns:
+                continue
+            train_values = {value for value in pd.unique(train_df[col].dropna())}
+            other_values = {value for value in pd.unique(other_df[col].dropna())}
+            unseen_values = other_values - train_values
+            if unseen_values:
+                unseen_rendered = sorted(str(value) for value in unseen_values)
+                raise ValueError(
+                    f"[{context}] Found categories not present in train for column '{col}': "
+                    f"{unseen_rendered}"
+                )
 
     @staticmethod
     def _clone_transforms(transforms: Any) -> Any:

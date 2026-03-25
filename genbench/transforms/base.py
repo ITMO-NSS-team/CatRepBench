@@ -30,9 +30,9 @@ class BaseTransform(Protocol):
       - optionally invertible
 
     The DataModule relies on:
-      - being able to call `.transform(df)` before `.fit(...)` for missing-removal
-        (DropMissingRows supports this).
-      - cloning via `get_state()/from_state()` for fold-wise refitting.
+      - stateless transforms being able to run without prior fit
+        (for example, DropMissingRows).
+      - cloning via `get_state()/from_state()` for split-wise refitting.
     """
 
     name: str

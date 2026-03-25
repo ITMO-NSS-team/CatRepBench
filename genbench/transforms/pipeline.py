@@ -51,8 +51,8 @@ class TransformPipeline:
         x = df
         for tr in self.transforms:
             if tr.requires_fit() and not _is_fitted(tr):
-                # Critical behavior: allow DataModule to call transform() pre-fit
-                # to perform global missing removal. We skip fitted-only transforms.
+                # Stateless transforms may still run, but fitted-only transforms are skipped
+                # until fit() is called on the split-specific training data.
                 continue
             x = tr.transform(x)
         return x

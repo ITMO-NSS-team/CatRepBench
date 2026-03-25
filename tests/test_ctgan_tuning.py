@@ -127,7 +127,7 @@ def test_tune_ctgan_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert DummyCtganGenerative.created[0].sample_sizes
     assert DummyCtganGenerative.created[0].sample_sizes[0] == 8  # len(val) for 80/20 split on n=40
     assert DummyCtganGenerative.created[0].train_df is not None
-    assert "x_cat" in DummyCtganGenerative.created[0].train_df.columns
+    assert "x_cat" not in DummyCtganGenerative.created[0].train_df.columns
     assert any(col.startswith("x_cat__") for col in DummyCtganGenerative.created[0].train_df.columns)
 
 
