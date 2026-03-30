@@ -8,3 +8,5 @@ category_encoders>=2.6.0
 optuna>=3.5
 pytest>=9.0
 torch>=1.12.0
+scikit-learn
+ucimlrepo
