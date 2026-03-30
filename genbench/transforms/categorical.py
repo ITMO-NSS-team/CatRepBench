@@ -19,6 +19,7 @@ from genbench.representations.backward_difference.backward_difference import (
     BackwardDifferenceRepresentation,
 )
 from genbench.representations.binary.binary import BinaryRepresentation
+from genbench.representations.hash.hash import HashRepresentation
 from genbench.representations.gumbel_softmax.gumbel_softmax import GumbelSoftmaxRepresentation
 
 
@@ -33,6 +34,7 @@ _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
     "helmert_representation": HelmertRepresentation,
     "backward_difference_representation": BackwardDifferenceRepresentation,
     "binary_representation": BinaryRepresentation,
+    "hash_representation": HashRepresentation,
     "gumbel_softmax_representation": GumbelSoftmaxRepresentation
 }
 
