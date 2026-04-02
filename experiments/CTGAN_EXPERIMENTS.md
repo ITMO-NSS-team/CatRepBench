@@ -27,37 +27,63 @@ The main entrypoints are:
 
 ## One-Time Setup
 
-### 1. Install dependencies
+### 1. Create and activate a virtual environment
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 2. Install dependencies
+
+```bash
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 2. Download datasets
+### 3. Download datasets
 
 The raw CSV datasets must exist under `datasets/raw/`.
 
-### 3. Create and share Google Sheets credentials
+### 4. Create and share Google Sheets credentials
 
 Use a Google service account with access to the experiment spreadsheet.
 
-The service account JSON key should be stored locally, for example:
+Recommended setup: copy the full service account JSON into your clipboard and export it directly into an environment variable.
+
+macOS:
 
 ```bash
-mkdir -p ~/.config/catrepbench
-mv ~/Downloads/service-account.json ~/.config/catrepbench/gsheets-service-account.json
-chmod 600 ~/.config/catrepbench/gsheets-service-account.json
+export CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON="$(pbpaste)"
 ```
 
-### 4. Export environment variables
+Linux with `xclip`:
+
+```bash
+export CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON="$(xclip -selection clipboard -o)"
+```
+
+Linux with `xsel`:
+
+```bash
+export CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON="$(xsel --clipboard --output)"
+```
+
+Fallback option: use a local JSON file and export its path.
 
 ```bash
 export CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH="$HOME/.config/catrepbench/gsheets-service-account.json"
+```
+
+### 5. Export environment variables
+
+```bash
 export CATREPBENCH_GSHEETS_SPREADSHEET_ID="<your-spreadsheet-id>"
 export CATREPBENCH_GSHEETS_WORKSHEET="CTGAN"
 ```
 
 To make this persistent, add the same exports to `~/.zshrc` or your shell profile.
+If you use the inline JSON method, prefer a password manager, secret manager, or session-only shell export instead of committing the JSON into dotfiles.
 
 ## Google Sheets Layout
 
@@ -195,11 +221,12 @@ Suggested onboarding sequence:
 
 1. clone the repository
 2. checkout the agreed branch
-3. install `requirements.txt`
-4. place the service account JSON locally
-5. export the three `CATREPBENCH_GSHEETS_*` variables
-6. run `--dry-run`
-7. start a normal worker or a `tmux` worker
+3. create and activate `.venv`
+4. install `requirements.txt`
+5. export the service account JSON from the clipboard, or configure a local file path
+6. export the remaining `CATREPBENCH_GSHEETS_*` variables
+7. run `--dry-run`
+8. start a normal worker or a `tmux` worker
 
 ## Status Semantics
 
@@ -251,5 +278,4 @@ If you want to make a failed or stale job available again:
 An empty cell becomes claimable again.
 
 Do not manually edit `run_id`, `owner`, or partial JSON fields.
-
 
