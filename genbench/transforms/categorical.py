@@ -22,6 +22,7 @@ from genbench.representations.binary.binary import BinaryRepresentation
 from genbench.representations.hash.hash import HashRepresentation
 from genbench.representations.gumbel_softmax.gumbel_softmax import GumbelSoftmaxRepresentation
 from genbench.representations.similarity.similarity import SimilarityRepresentation
+from genbench.representations.gel.gel import GELRepresentation
 
 
 # Registry for representations usable via this transform.
@@ -38,6 +39,7 @@ _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
     "hash_representation": HashRepresentation,
     "gumbel_softmax_representation": GumbelSoftmaxRepresentation,
     "similarity_representation": SimilarityRepresentation,
+    "gel_representation": GELRepresentation,
 }
 
 
