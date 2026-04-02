@@ -138,6 +138,30 @@ def fake_long_running_process(*args, **kwargs):
     )
 
 
+def fake_failing_process_with_oom_output(*args, **kwargs):
+    stdout = io.StringIO("RuntimeError: MPS backend out of memory\n")
+    return SimpleNamespace(
+        stdout=stdout,
+        poll=lambda: 1,
+        wait=lambda timeout=None: 1,
+        terminate=lambda: None,
+        kill=lambda: None,
+        returncode=1,
+    )
+
+
+def fake_signal_terminated_process(*args, **kwargs):
+    stdout = io.StringIO("")
+    return SimpleNamespace(
+        stdout=stdout,
+        poll=lambda: -9,
+        wait=lambda timeout=None: -9,
+        terminate=lambda: None,
+        kill=lambda: None,
+        returncode=-9,
+    )
+
+
 def test_dry_run_reports_candidate_without_writing(monkeypatch, tmp_path):
     manifest_path = write_orchestrator_manifest(tmp_path)
     fake_sheets = FakeSheetsClient.single_not_started_cell()
@@ -192,6 +216,41 @@ def test_orchestrator_updates_heartbeat_while_process_is_alive(monkeypatch, tmp_
     )
     assert out.exit_code == 0
     assert any(payload.status == "in-progress" for payload in fake_sheets.write_calls)
+
+
+def test_orchestrator_classifies_out_of_memory_failures(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    fake_sheets = FakeSheetsClient.single_not_started_cell()
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", fake_failing_process_with_oom_output)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+    )
+
+    assert out.exit_code != 0
+    assert fake_sheets.last_payload.status == "failed"
+    assert "resource_exhausted" in fake_sheets.last_payload.note
+    assert "out of memory" in fake_sheets.last_payload.note
+
+
+def test_orchestrator_classifies_signal_terminated_failures(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    fake_sheets = FakeSheetsClient.single_not_started_cell()
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", fake_signal_terminated_process)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+    )
+
+    assert out.exit_code != 0
+    assert fake_sheets.last_payload.status == "failed"
+    assert "terminated by signal 9" in fake_sheets.last_payload.note
 
 
 def test_orchestrator_cli_help_runs_as_script():

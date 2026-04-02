@@ -29,6 +29,7 @@ from experiments.ctgan_sheets import SheetsClient, SheetsConfig
 
 _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
 _HEARTBEAT_FAILURE_TIMEOUT_SECONDS = 15 * 60
+_FAILURE_OUTPUT_TAIL_LINES = 8
 
 
 class SheetsClientProtocol(Protocol):
@@ -276,6 +277,7 @@ def _supervise_runner(
 ) -> int:
     current_stage = "launching"
     current_note = "runner started"
+    failure_output_tail: list[str] = []
     heartbeat_interval = max(heartbeat_seconds, 0)
     next_heartbeat_at = time.monotonic() + heartbeat_interval
     heartbeat_fail_started_at: float | None = None
@@ -304,6 +306,8 @@ def _supervise_runner(
                     if _heartbeat_failure_expired(heartbeat_fail_started_at):
                         _stop_process(process)
                         return 1
+            else:
+                _append_failure_output_line(failure_output_tail, line)
             continue
 
         if process.poll() is not None:
@@ -330,7 +334,11 @@ def _supervise_runner(
     return_code = process.wait(timeout=5) if hasattr(process, "wait") else getattr(process, "returncode", 1)
     terminal_status = "done" if return_code == 0 else "failed"
     terminal_stage = "done" if return_code == 0 else "failed"
-    terminal_note = current_note if return_code == 0 else f"runner exited with code {return_code}"
+    terminal_note = (
+        current_note
+        if return_code == 0
+        else _classify_runner_failure(return_code=return_code, failure_output_tail=failure_output_tail)
+    )
 
     if not _write_terminal_state(
         sheets=sheets,
@@ -432,6 +440,40 @@ def _parse_progress_event(line: str) -> dict[str, str] | None:
     if not isinstance(stage, str) or not isinstance(message, str):
         return None
     return {"stage": stage, "message": message}
+
+
+def _append_failure_output_line(buffer: list[str], line: str) -> None:
+    normalized = " ".join(line.strip().split())
+    if not normalized:
+        return
+    buffer.append(normalized)
+    if len(buffer) > _FAILURE_OUTPUT_TAIL_LINES:
+        del buffer[: len(buffer) - _FAILURE_OUTPUT_TAIL_LINES]
+
+
+def _classify_runner_failure(*, return_code: int, failure_output_tail: list[str]) -> str:
+    if return_code < 0:
+        return f"runner terminated by signal {-return_code}"
+
+    tail_text = " | ".join(failure_output_tail)
+    tail_lower = tail_text.lower()
+    if any(
+        marker in tail_lower
+        for marker in (
+            "out of memory",
+            "oom",
+            "mps backend out of memory",
+            "cuda out of memory",
+            "not enough memory",
+        )
+    ):
+        if tail_text:
+            return f"resource_exhausted: {tail_text}"
+        return "resource_exhausted: runner reported out of memory"
+
+    if tail_text:
+        return f"runner exited with code {return_code}: {tail_text}"
+    return f"runner exited with code {return_code}"
 
 
 def _build_runner_argv(
