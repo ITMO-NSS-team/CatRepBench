@@ -153,6 +153,22 @@ def test_tune_ctgan_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):
     assert (result.model_artifacts_dir / "ctgan.pkl").exists()
 
 
+def test_tune_ctgan_can_write_to_explicit_output_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    result = tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=1,
+        output_dir=tmp_path / "run" / "tuning",
+        device="cpu",
+    )
+    assert result.output_dir == tmp_path / "run" / "tuning"
+    assert (result.output_dir / "summary.json").exists()
+
+
 def test_tune_ctgan_and_return_params_wrapper(tmp_path, monkeypatch):
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []

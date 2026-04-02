@@ -21,12 +21,15 @@ Available tune_ctgan flags:
   discrete columns in transformed space. If None, inferred from transformed schema.
 - output_root (Path | str, default=Path("experiments/optuna_results")):
   Root output directory.
+- output_dir (Path | str | None, default=None): Optional explicit artifact
+  directory. When provided, artifacts are written directly there.
 - save_model (bool, default=False): Save fitted CTGAN artifacts for best params.
 - timeout_seconds (Optional[int], default=None): Optional Optuna timeout.
 - device (str, default="cuda"): "cpu" or "cuda".
 
 Outputs:
-- experiments/optuna_results/ctgan/<dataset>/<encoding_method>/
+- explicit `output_dir`, when provided
+- otherwise: experiments/optuna_results/ctgan/<dataset>/<encoding_method>/
 - summary.json, trials.csv, best_params.json (+ model_artifacts/ when save_model=True)
 """
 
@@ -43,19 +46,17 @@ import numpy as np
 import optuna
 import pandas as pd
 
+from experiments.ctgan_common import (
+    build_ctgan_kwargs,
+    build_preprocess_pipeline,
+    default_discrete_cols,
+)
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigHoldout
 from genbench.evaluation.distribution.wasserstein import WassersteinDistanceMetric
 from genbench.evaluation.pipeline.single_run import DistributionEvaluationPipeline
 from genbench.generative.ctgan.ctgan import CtganGenerative
-from genbench.transforms.categorical import (
-    CategoricalRepresentationTransform,
-    list_registered_representations,
-)
-from genbench.transforms.continuous import ContinuousStandardScaler
-from genbench.transforms.missing import DropMissingRows
-from genbench.transforms.pipeline import TransformPipeline
 from genbench.transforms.target import TargetTypePreprocessor, infer_is_regression_target
 
 @dataclass(frozen=True)
@@ -104,52 +105,6 @@ def _save_json(path: Path, payload: Dict[str, Any]) -> None:
         json.dump(_jsonify(payload), f, ensure_ascii=False, indent=2)
 
 
-def _validate_encoding_method(encoding_method: str) -> str:
-    supported = list_registered_representations()
-    if encoding_method not in supported:
-        raise ValueError(
-            "Unsupported encoding_method. "
-            f"Use one of {supported}. Got: '{encoding_method}'."
-        )
-    return encoding_method
-
-
-def _build_preprocess_pipeline(
-    schema: TabularSchema,
-    encoding_method: str,
-    task_type: Optional[str],
-) -> tuple[TransformPipeline, Optional[str]]:
-    representation_name = _validate_encoding_method(encoding_method)
-    transforms = [DropMissingRows(), ContinuousStandardScaler()]
-    if schema.categorical_cols:
-        transforms.append(
-            CategoricalRepresentationTransform(
-                representation_name=representation_name,
-            )
-        )
-    else:
-        representation_name = None
-    transforms.append(
-        TargetTypePreprocessor(
-            task_type=task_type,
-        )
-    )
-    return TransformPipeline(transforms=transforms), representation_name
-
-
-def _default_discrete_cols(
-    schema: TabularSchema,
-    train_df: pd.DataFrame,
-    *,
-    include_target_for_classification: bool,
-) -> list[str]:
-    cols = [c for c in list(schema.discrete_cols) + list(schema.categorical_cols) if c in train_df.columns]
-    if include_target_for_classification and schema.target_col and schema.target_col in train_df.columns:
-        if schema.target_col not in cols:
-            cols.append(schema.target_col)
-    return cols
-
-
 def _suggest_ctgan_params(
     trial: optuna.Trial,
     *,
@@ -164,19 +119,19 @@ def _suggest_ctgan_params(
     generator_lr = float(trial.suggest_float("generator_lr", 1e-4, 2e-3, log=True))
     lr_ratio = float(trial.suggest_float("lr_ratio", 0.7, 1.5, log=True))
 
-    return {
-        "epochs": int(epochs),
-        "embedding_dim": embedding_dim,
-        "generator_dim": (gen_dim, gen_dim),
-        "discriminator_dim": (disc_dim, disc_dim),
-        "batch_size": batch_size,
-        "discriminator_steps": discriminator_steps,
-        "generator_lr": generator_lr,
-        "discriminator_lr": generator_lr * lr_ratio,
-        "pac": 1,
-        "verbose": False,
-        "cuda": device == "cuda",
-    }
+    return build_ctgan_kwargs(
+        {
+            "embedding_dim": embedding_dim,
+            "gen_dim": gen_dim,
+            "disc_dim": disc_dim,
+            "batch_size": batch_size,
+            "discriminator_steps": discriminator_steps,
+            "generator_lr": generator_lr,
+            "lr_ratio": lr_ratio,
+        },
+        epochs=epochs,
+        device=device,
+    )
 
 
 def _score_synthetic(
@@ -204,7 +159,7 @@ def _build_holdout(
     task_type: Optional[str],
     holdout_cfg: SplitConfigHoldout,
 ) -> tuple[pd.DataFrame, pd.DataFrame, TabularSchema, Dict[str, Any]]:
-    pipeline, representation_name = _build_preprocess_pipeline(
+    pipeline, representation_name = build_preprocess_pipeline(
         schema=schema,
         encoding_method=encoding_method,
         task_type=task_type,
@@ -275,6 +230,7 @@ def tune_ctgan(
     holdout_cfg: Optional[SplitConfigHoldout] = None,
     discrete_cols: Optional[Sequence[str]] = None,
     output_root: Path | str = Path("experiments/optuna_results"),
+    output_dir: Path | str | None = None,
     save_model: bool = False,
     timeout_seconds: Optional[int] = None,
     device: str = "cuda",
@@ -283,7 +239,8 @@ def tune_ctgan(
     Finetune CTGAN with Optuna using only project wrappers/classes/metrics.
 
     Saves results to:
-      experiments/optuna_results/ctgan/<dataset>/<encoding_method>
+      output_dir, when provided
+      otherwise experiments/optuna_results/ctgan/<dataset>/<encoding_method>
     """
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0.")
@@ -291,9 +248,6 @@ def tune_ctgan(
         raise ValueError("epochs must be > 0.")
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'.")
-    encoding_method = _validate_encoding_method(encoding_method)
-
-    output_dir = _ensure_dir(Path(output_root) / "ctgan" / _slug(dataset) / _slug(encoding_method))
     cfg = holdout_cfg or SplitConfigHoldout(val_size=0.2, shuffle=True, random_seed=5)
     train_df, val_df, transformed_schema, preprocessing_meta = _build_holdout(
         df=df,
@@ -303,11 +257,16 @@ def tune_ctgan(
         holdout_cfg=cfg,
     )
     is_regression = bool(preprocessing_meta["target_processing"]["is_regression"])
+    output_dir = _ensure_dir(
+        Path(output_dir)
+        if output_dir is not None
+        else Path(output_root) / "ctgan" / _slug(dataset) / _slug(encoding_method)
+    )
 
     used_discrete_cols = (
         [c for c in discrete_cols if c in train_df.columns]
         if discrete_cols is not None
-        else _default_discrete_cols(
+        else default_discrete_cols(
             schema=transformed_schema,
             train_df=train_df,
             include_target_for_classification=(not is_regression),
