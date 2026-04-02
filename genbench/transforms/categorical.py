@@ -21,6 +21,7 @@ from genbench.representations.backward_difference.backward_difference import (
 from genbench.representations.binary.binary import BinaryRepresentation
 from genbench.representations.hash.hash import HashRepresentation
 from genbench.representations.gumbel_softmax.gumbel_softmax import GumbelSoftmaxRepresentation
+from genbench.representations.similarity.similarity import SimilarityRepresentation
 from genbench.representations.gel.gel import GELRepresentation
 
 
@@ -37,6 +38,7 @@ _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
     "binary_representation": BinaryRepresentation,
     "hash_representation": HashRepresentation,
     "gumbel_softmax_representation": GumbelSoftmaxRepresentation,
+    "similarity_representation": SimilarityRepresentation,
     "gel_representation": GELRepresentation,
 }
 
@@ -46,6 +48,8 @@ def list_registered_representations() -> list[str]:
     Return sorted representation ids accepted by CategoricalRepresentationTransform.
     """
     return sorted(_REPRESENTATION_REGISTRY.keys())
+
+
 @dataclass
 class CategoricalRepresentationTransform:
     """
