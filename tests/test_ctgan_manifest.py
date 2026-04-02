@@ -268,8 +268,20 @@ def test_repository_manifest_covers_canonical_datasets_registered_encodings_and_
     assert encoding_ids == set(list_registered_representations())
 
     for entry in manifest.datasets:
-        assert entry.csv_path.exists()
+        assert entry.csv_path == project_root / "datasets" / "raw" / f"{entry.dataset_id}.csv"
 
+
+def test_repository_manifest_matches_downloaded_dataset_headers_when_raw_csvs_are_present():
+    project_root = Path(__file__).resolve().parents[1]
+    manifest = load_ctgan_manifest(
+        project_root / "experiments" / "ctgan_orchestrator_manifest.json",
+        project_root=project_root,
+    )
+    missing_paths = [entry.csv_path for entry in manifest.datasets if not entry.csv_path.exists()]
+    if missing_paths:
+        pytest.skip("downloaded datasets/raw CSVs are not present in this checkout")
+
+    for entry in manifest.datasets:
         with entry.csv_path.open(newline="", encoding="utf-8") as f:
             header = next(csv.reader(f))
 
