@@ -83,8 +83,40 @@ def test_tstr_catboost_runs(sample_data):
     real_small = real.head(50).copy()
     synth_small = synth.head(50).copy()
     scores = tstr_catboost(real_small, real_small, synth_small, schema, random_seed=0)
-    for key in ["r2_real", "mape_real", "r2_synth", "mape_synth", "r2_pct_diff", "mape_pct_diff"]:
+    for key in ["task_type", "r2_real", "r2_synth", "r2_pct_diff"]:
         assert key in scores
+    assert scores["task_type"] == "regression"
+
+
+def test_tstr_catboost_uses_weighted_f1_for_classification():
+    pytest.importorskip("catboost")
+    df = pd.DataFrame(
+        {
+            "x": [0, 1, 0, 1, 0, 1, 0, 1],
+            "cat": ["a", "a", "b", "b", "a", "b", "a", "b"],
+            "target": [0, 0, 1, 1, 0, 1, 0, 1],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=[],
+        discrete_cols=["x"],
+        categorical_cols=["cat"],
+        target_col="target",
+    )
+
+    scores = tstr_catboost(
+        train_real=df.iloc[:6].copy(),
+        test_real=df.iloc[6:].copy(),
+        synth_train=df.iloc[:6].copy(),
+        schema=schema,
+        random_seed=0,
+        task_type="classification",
+    )
+
+    for key in ["task_type", "f1_weighted_real", "f1_weighted_synth", "f1_weighted_pct_diff"]:
+        assert key in scores
+    assert scores["task_type"] == "classification"
+    assert "r2_real" not in scores
 
 
 def test_tstr_evaluator_class(sample_data):

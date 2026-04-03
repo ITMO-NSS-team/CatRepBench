@@ -13,15 +13,18 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.ctgan_common import (
+    DEFAULT_CTGAN_EPOCHS,
     build_ctgan_kwargs,
     build_preprocess_pipeline,
     default_discrete_cols,
 )
 from experiments.ctgan_manifest import load_ctgan_manifest
-from experiments.ctgan_tuning import tune_ctgan
+from experiments.ctgan_tuning import select_ctgan_best_params
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigKFold
+from genbench.evaluation.distribution.corr_frobenius import CorrelationFrobeniusMetric
+from genbench.evaluation.distribution.marginal_kl import MarginalKLDivergenceMetric
 from genbench.evaluation.distribution.wasserstein import WassersteinDistanceMetric
 from genbench.evaluation.pipeline.single_run import DistributionEvaluationPipeline
 from genbench.generative.ctgan.ctgan import CtganGenerative
@@ -43,6 +46,16 @@ class FullCtganExperimentResult:
     output_dir: Path
     summary_path: Path
     aggregate_metrics_path: Path
+
+
+@dataclass(frozen=True)
+class PreparedFoldData:
+    train_raw: pd.DataFrame
+    test_raw: pd.DataFrame
+    train_transformed: pd.DataFrame
+    test_transformed: pd.DataFrame
+    transformed_schema: TabularSchema
+    transforms: Any | None
 
 
 def _resolve_manifest_encoding(manifest: Any, *, encoding_method: str) -> Any:
@@ -144,7 +157,7 @@ def _prepare_fold_data(
     is_regression: bool | None,
     split_cfg: SplitConfigKFold,
     fold_id: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, TabularSchema]:
+) -> PreparedFoldData:
     task_type = None
     if is_regression is True:
         task_type = "regression"
@@ -159,6 +172,8 @@ def _prepare_fold_data(
     dm = TabularDataModule(df=df, schema=schema, transforms=pipeline, validate=True)
     dm.prepare_kfold(split_cfg)
     fold = dm.get_fold(fold_id)
+    train_raw = dm.df_clean.iloc[dm._kfold_splits[fold_id].train_idx].copy().reset_index(drop=True)  # type: ignore[index]
+    test_raw = dm.df_clean.iloc[dm._kfold_splits[fold_id].test_idx].copy().reset_index(drop=True)  # type: ignore[index]
     train_df = fold.train.reset_index(drop=True)
     test_df = fold.test.reset_index(drop=True)
     transformed_schema = TabularSchema.infer_from_dataframe(
@@ -167,7 +182,83 @@ def _prepare_fold_data(
         id_col=schema.id_col,
     )
     transformed_schema.validate(test_df)
-    return train_df, test_df, transformed_schema
+    return PreparedFoldData(
+        train_raw=train_raw,
+        test_raw=test_raw,
+        train_transformed=train_df,
+        test_transformed=test_df,
+        transformed_schema=transformed_schema,
+        transforms=fold.transforms,
+    )
+
+
+def _task_type_from_flag(is_regression: bool | None) -> str | None:
+    if is_regression is True:
+        return "regression"
+    if is_regression is False:
+        return "classification"
+    return None
+
+
+def _compute_distribution_scores(
+    *,
+    test_df: pd.DataFrame,
+    synth_df: pd.DataFrame,
+    transformed_schema: TabularSchema,
+) -> dict[str, float]:
+    dist_pipeline = DistributionEvaluationPipeline(
+        metrics=[
+            WassersteinDistanceMetric(),
+            MarginalKLDivergenceMetric(),
+            CorrelationFrobeniusMetric(),
+        ]
+    )
+    scores = dist_pipeline.evaluate(real=test_df, synth=synth_df, schema=transformed_schema).scores
+    return {
+        "wasserstein_mean": float(scores["wasserstein_mean"]),
+        "marginal_kl_mean": float(scores["marginal_kl_mean"]),
+        "corr_frobenius_transformed": float(scores["corr_frobenius"]),
+    }
+
+
+def _compute_original_space_corr(
+    *,
+    test_raw: pd.DataFrame,
+    synth_df: pd.DataFrame,
+    schema: TabularSchema,
+    transforms: Any | None,
+) -> tuple[float | None, str]:
+    if transforms is None:
+        return float(CorrelationFrobeniusMetric().compute(real=test_raw, synth=synth_df, schema=schema)), "ok"
+
+    try:
+        synth_original = transforms.inverse_transform(synth_df).reset_index(drop=True)
+    except (NotImplementedError, RuntimeError, ValueError, KeyError):
+        return None, "unsupported_not_invertible"
+
+    value = float(CorrelationFrobeniusMetric().compute(real=test_raw, synth=synth_original, schema=schema))
+    return value, "ok"
+
+
+def _compute_tstr_scores(
+    *,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    synth_df: pd.DataFrame,
+    transformed_schema: TabularSchema,
+    is_regression: bool | None,
+) -> dict[str, Any]:
+    if transformed_schema.target_col is None:
+        return {"status": "unsupported_no_target"}
+
+    scores = tstr_catboost(
+        train_real=train_df,
+        test_real=test_df,
+        synth_train=synth_df,
+        schema=transformed_schema,
+        task_type=_task_type_from_flag(is_regression),
+    )
+    return {"status": "ok", **scores}
 
 
 def _run_crossval_fold(
@@ -181,7 +272,7 @@ def _run_crossval_fold(
     is_regression: bool | None,
 ) -> dict[str, Any]:
     split_cfg = SplitConfigKFold(n_splits=5, shuffle=True, random_seed=42)
-    train_df, test_df, transformed_schema = _prepare_fold_data(
+    fold_data = _prepare_fold_data(
         df=df,
         schema=schema,
         encoding_method=encoding_method,
@@ -189,50 +280,44 @@ def _run_crossval_fold(
         split_cfg=split_cfg,
         fold_id=fold_id,
     )
-    ctgan_kwargs = build_ctgan_kwargs(best_params, epochs=50, device=device)
+    ctgan_kwargs = build_ctgan_kwargs(best_params, epochs=DEFAULT_CTGAN_EPOCHS, device=device)
     discrete_cols = default_discrete_cols(
-        schema=transformed_schema,
-        train_df=train_df,
+        schema=fold_data.transformed_schema,
+        train_df=fold_data.train_transformed,
         include_target_for_classification=(is_regression is False),
     )
     model = CtganGenerative(discrete_cols=discrete_cols, ctgan_kwargs=ctgan_kwargs)
-    model.fit(train_df, transformed_schema)
-    synth_df = model.sample(len(train_df)).reset_index(drop=True)
+    model.fit(fold_data.train_transformed, fold_data.transformed_schema)
+    synth_df = model.sample(len(fold_data.train_transformed)).reset_index(drop=True)
 
-    dist_pipeline = DistributionEvaluationPipeline(metrics=[WassersteinDistanceMetric()])
-    distribution_scores = {
-        key: float(value)
-        for key, value in dist_pipeline.evaluate(
-            real=train_df,
-            synth=synth_df,
-            schema=transformed_schema,
-        ).scores.items()
-    }
+    distribution_scores = _compute_distribution_scores(
+        test_df=fold_data.test_transformed,
+        synth_df=synth_df,
+        transformed_schema=fold_data.transformed_schema,
+    )
+    corr_original_value, corr_original_status = _compute_original_space_corr(
+        test_raw=fold_data.test_raw,
+        synth_df=synth_df,
+        schema=schema,
+        transforms=fold_data.transforms,
+    )
+    distribution_scores["corr_frobenius_original"] = corr_original_value
+    distribution_scores["corr_frobenius_original_status"] = corr_original_status
 
-    if schema.target_col is None:
-        tstr_scores: dict[str, Any] = {"status": "unsupported_no_target"}
-    elif is_regression is False:
-        tstr_scores = {"status": "unsupported_classification"}
-    else:
-        tstr_scores = {"status": "ok"}
-        tstr_scores.update(
-            {
-                key: float(value)
-                for key, value in tstr_catboost(
-                    train_real=train_df,
-                    test_real=test_df,
-                    synth_train=synth_df,
-                    schema=transformed_schema,
-                ).items()
-            }
-        )
+    tstr_scores = _compute_tstr_scores(
+        train_df=fold_data.train_transformed,
+        test_df=fold_data.test_transformed,
+        synth_df=synth_df,
+        transformed_schema=fold_data.transformed_schema,
+        is_regression=is_regression,
+    )
 
     return {
         "fold_id": int(fold_id),
-        "n_train": int(len(train_df)),
-        "n_test": int(len(test_df)),
+        "n_train": int(len(fold_data.train_transformed)),
+        "n_test": int(len(fold_data.test_transformed)),
         "distribution": distribution_scores,
-        "tstr": tstr_scores,
+        "utility": tstr_scores,
     }
 
 
@@ -292,12 +377,14 @@ def run_full_ctgan_experiment(
         dataset_id=dataset_id,
         encoding_method=encoding_method,
     )
-    tuning_result = tune_ctgan(
+    tuning_output_dir = run_dir / "tuning"
+    tuning_result = select_ctgan_best_params(
         df=df,
         schema=schema,
         dataset=dataset.label,
         encoding_method=encoding_method,
-        output_dir=run_dir / "tuning",
+        task_type=_task_type_from_flag(is_regression),
+        output_dir=tuning_output_dir,
         device=device,
     )
 
@@ -317,7 +404,7 @@ def run_full_ctgan_experiment(
             df=df,
             schema=schema,
             encoding_method=encoding_method,
-            best_params=dict(tuning_result.best_params),
+            best_params=dict(tuning_result["best_params"]),
             device=device,
             is_regression=is_regression,
         )
@@ -341,29 +428,29 @@ def run_full_ctgan_experiment(
             dataset_id=dataset_id,
             encoding_method=encoding_method,
         )
-    elif is_regression is False:
-        _emit_progress(
-            stage="metrics",
-            message="skipping tstr utility: classification target unsupported",
-            progress_stream=progress_stream,
-            progress_format=progress_format,
-            dataset_id=dataset_id,
-            encoding_method=encoding_method,
-        )
     distribution_records = [fold["distribution"] for fold in fold_results]
-    tstr_records = [
-        {key: value for key, value in fold["tstr"].items() if key != "status"}
+    utility_records = [
+        {key: value for key, value in fold["utility"].items() if key not in {"status", "task_type"}}
         for fold in fold_results
-        if fold["tstr"].get("status") == "ok"
+        if fold["utility"].get("status") == "ok"
     ]
-    tstr_status = fold_results[0]["tstr"]["status"] if fold_results else "unsupported_no_target"
+    utility_status = fold_results[0]["utility"]["status"] if fold_results else "unsupported_no_target"
+    utility_task_type = (
+        fold_results[0]["utility"].get("task_type")
+        if fold_results and fold_results[0]["utility"].get("status") == "ok"
+        else None
+    )
     aggregate_payload = {
         "dataset_id": dataset_id,
         "dataset_label": dataset_label,
         "encoding_method": encoding_method,
         "n_folds": 5,
         "distribution": _aggregate_numeric_records(distribution_records),
-        "tstr": {"status": tstr_status, "metrics": _aggregate_numeric_records(tstr_records)},
+        "tstr": {
+            "status": utility_status,
+            "task_type": utility_task_type,
+            "metrics": _aggregate_numeric_records(utility_records),
+        },
     }
     aggregate_metrics_path = run_dir / "metrics" / "aggregate.json"
     _save_json(aggregate_metrics_path, aggregate_payload)
@@ -393,8 +480,11 @@ def run_full_ctgan_experiment(
                 "id_col": schema.id_col,
             },
             "tuning": {
-                "output_dir": tuning_result.output_dir,
-                "best_params": dict(tuning_result.best_params),
+                "output_dir": tuning_output_dir,
+                "summary_path": tuning_output_dir / "summary.json",
+                "best_params": dict(tuning_result["best_params"]),
+                "best_value": tuning_result["best_value"],
+                "best_source": tuning_result["best_source"],
             },
             "crossval": {
                 "n_folds": 5,

@@ -33,6 +33,8 @@ def write_runner_manifest(
     dataset_id: str = "openml_adult",
     label: str = "adult",
     target_col: str = "target",
+    encoding_label: str = "one-hot",
+    encoding_id: str = "one_hot_representation",
 ) -> Path:
     path = tmp_path / "manifest.json"
     path.write_text(
@@ -42,7 +44,7 @@ def write_runner_manifest(
                     {"label": label, "dataset_id": dataset_id, "target_col": target_col, "id_col": None}
                 ],
                 "encodings": [
-                    {"label": "one-hot", "encoding_id": "one_hot_representation"}
+                    {"label": encoding_label, "encoding_id": encoding_id}
                 ],
             }
         ),
@@ -64,14 +66,18 @@ def write_runner_csv(
             "x_cont": [0.1 * i for i in range(10)],
             "x_disc": [i % 2 for i in range(10)],
             "x_cat": ["a" if i % 2 == 0 else "b" for i in range(10)],
-            target_col: [float(i) for i in range(10)],
+            target_col: [0.15 * i + 0.03 for i in range(10)],
         }
     ).to_csv(data_dir / f"{dataset_id}.csv", index=False)
 
 
 class DummyCtganGenerative:
+    created: list["DummyCtganGenerative"] = []
+
     def __init__(self, *args, **kwargs):
         self._train_df: pd.DataFrame | None = None
+        self.ctgan_kwargs = dict(kwargs.get("ctgan_kwargs", {}))
+        DummyCtganGenerative.created.append(self)
 
     def fit(self, train_df: pd.DataFrame, *args, **kwargs) -> "DummyCtganGenerative":
         self._train_df = train_df.copy()
@@ -83,7 +89,7 @@ class DummyCtganGenerative:
         return self._train_df.head(n).reset_index(drop=True)
 
 
-def fake_tune_ctgan(*, output_dir, **kwargs):
+def fake_select_ctgan_best_params(*, output_dir, **kwargs):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "summary.json").write_text(json.dumps({"best_value": 0.123}), encoding="utf-8")
@@ -102,9 +108,8 @@ def fake_tune_ctgan(*, output_dir, **kwargs):
         ),
         encoding="utf-8",
     )
-    return SimpleNamespace(
-        output_dir=output_dir,
-        best_params={
+    return {
+        "best_params": {
             "embedding_dim": 128,
             "gen_dim": 256,
             "disc_dim": 256,
@@ -113,16 +118,33 @@ def fake_tune_ctgan(*, output_dir, **kwargs):
             "generator_lr": 1e-3,
             "lr_ratio": 1.0,
         },
-    )
+        "best_value": 0.123,
+        "best_source": "stage1",
+    }
+
+
+def make_task_type_capturing_select(captured: dict[str, object]):
+    def _fake_select(*, output_dir, **kwargs):
+        captured["task_type"] = kwargs.get("task_type")
+        return fake_select_ctgan_best_params(output_dir=output_dir, **kwargs)
+
+    return _fake_select
 
 
 def fake_tstr(*args, **kwargs):
+    task_type = kwargs.get("task_type", "regression")
+    if task_type == "classification":
+        return {
+            "task_type": "classification",
+            "f1_weighted_real": 0.91,
+            "f1_weighted_synth": 0.87,
+            "f1_weighted_pct_diff": 4.4,
+        }
     return {
-        "status": "ok",
+        "task_type": "regression",
         "r2_real": 0.91,
         "r2_synth": 0.87,
-        "rmse_real": 0.14,
-        "rmse_synth": 0.19,
+        "r2_pct_diff": 4.4,
     }
 
 
@@ -171,8 +193,9 @@ def fake_run_full_experiment(
 def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
+    DummyCtganGenerative.created = []
     monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
-    monkeypatch.setattr(full_mod, "tune_ctgan", fake_tune_ctgan)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params)
     monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
 
     result = full_mod.run_full_ctgan_experiment(
@@ -189,13 +212,51 @@ def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     assert (result.output_dir / "tuning" / "summary.json").exists()
     assert (result.output_dir / "metrics" / "aggregate.json").exists()
     assert (result.output_dir / "crossval" / "per_fold" / "fold_0.json").exists()
+    fold_payload = json.loads((result.output_dir / "crossval" / "per_fold" / "fold_0.json").read_text(encoding="utf-8"))
+    assert "wasserstein_mean" in fold_payload["distribution"]
+    assert "marginal_kl_mean" in fold_payload["distribution"]
+    assert "corr_frobenius_transformed" in fold_payload["distribution"]
+    assert "corr_frobenius_original" in fold_payload["distribution"]
+    assert fold_payload["distribution"]["corr_frobenius_original_status"] == "ok"
+    assert fold_payload["utility"]["task_type"] == "regression"
+    assert "r2_real" in fold_payload["utility"]
+    aggregate_payload = json.loads((result.output_dir / "metrics" / "aggregate.json").read_text(encoding="utf-8"))
+    assert set(aggregate_payload["distribution"]) == {
+        "wasserstein_mean",
+        "marginal_kl_mean",
+        "corr_frobenius_transformed",
+        "corr_frobenius_original",
+    }
+    assert set(aggregate_payload["tstr"]["metrics"]) == {"r2_real", "r2_synth", "r2_pct_diff"}
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 300
 
 
-def test_run_full_experiment_marks_tstr_unsupported_for_classification(tmp_path, monkeypatch):
+def test_run_full_experiment_passes_explicit_task_type_to_tuning(tmp_path, monkeypatch):
+    manifest_path = write_runner_manifest(tmp_path)
+    write_runner_csv(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", make_task_type_capturing_select(captured))
+    monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+
+    full_mod.run_full_ctgan_experiment(
+        manifest_path=manifest_path,
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        output_root=tmp_path / "results",
+        device="cpu",
+    )
+
+    assert captured["task_type"] == "regression"
+
+
+def test_run_full_experiment_uses_weighted_f1_for_classification(tmp_path, monkeypatch):
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
     monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
-    monkeypatch.setattr(full_mod, "tune_ctgan", fake_tune_ctgan)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params)
     monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
     monkeypatch.setattr(full_mod, "infer_is_regression_target", lambda *args, **kwargs: False)
     progress_stream = StringIO()
@@ -211,8 +272,9 @@ def test_run_full_experiment_marks_tstr_unsupported_for_classification(tmp_path,
     )
 
     payload = json.loads((result.output_dir / "run_summary.json").read_text(encoding="utf-8"))
-    assert payload["tstr"]["status"] == "unsupported_classification"
-    assert "skipping tstr utility: classification target unsupported" in progress_stream.getvalue()
+    assert payload["tstr"]["task_type"] == "classification"
+    assert "f1_weighted_real" in payload["tstr"]["metrics"]
+    assert "f1_weighted_synth" in payload["tstr"]["metrics"]
     assert first_occurrence_order(progress_stages(progress_stream)) == [
         "launching",
         "tuning",
@@ -226,7 +288,7 @@ def test_run_full_experiment_marks_tstr_unsupported_without_target(tmp_path, mon
     manifest_path = write_runner_manifest(tmp_path, dataset_id="openml_no_target")
     write_runner_csv(tmp_path, dataset_id="openml_no_target", target_col="value")
     monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
-    monkeypatch.setattr(full_mod, "tune_ctgan", fake_tune_ctgan)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params)
     monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
     monkeypatch.setattr(full_mod, "load_ctgan_manifest", fake_manifest_without_target)
     progress_stream = StringIO()
@@ -258,7 +320,7 @@ def test_run_full_experiment_validates_encoding_method_against_manifest(tmp_path
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
     monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
-    monkeypatch.setattr(full_mod, "tune_ctgan", fake_tune_ctgan)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params)
     monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
 
     try:
@@ -274,6 +336,31 @@ def test_run_full_experiment_validates_encoding_method_against_manifest(tmp_path
         assert "encoding_method mismatch" in str(exc)
     else:
         raise AssertionError("Expected run_full_ctgan_experiment() to validate encoding_method against the manifest")
+
+
+def test_run_full_experiment_marks_original_corr_unsupported_for_non_invertible_representation(tmp_path, monkeypatch):
+    manifest_path = write_runner_manifest(
+        tmp_path,
+        encoding_label="hash",
+        encoding_id="hash_representation",
+    )
+    write_runner_csv(tmp_path)
+    monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params)
+    monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+
+    result = full_mod.run_full_ctgan_experiment(
+        manifest_path=manifest_path,
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="hash_representation",
+        output_root=tmp_path / "results",
+        device="cpu",
+    )
+
+    fold_payload = json.loads((result.output_dir / "crossval" / "per_fold" / "fold_0.json").read_text(encoding="utf-8"))
+    assert fold_payload["distribution"]["corr_frobenius_original"] is None
+    assert fold_payload["distribution"]["corr_frobenius_original_status"] == "unsupported_not_invertible"
 
 
 def test_cli_emits_progress_jsonl(capsys, monkeypatch, tmp_path):

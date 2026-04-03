@@ -14,6 +14,8 @@ from genbench.transforms.missing import DropMissingRows
 from genbench.transforms.pipeline import TransformPipeline
 from genbench.transforms.target import TargetTypePreprocessor
 
+DEFAULT_CTGAN_EPOCHS = 300
+
 
 def _validate_device(device: str) -> str:
     if device not in {"cpu", "cuda"}:

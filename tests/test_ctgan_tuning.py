@@ -131,6 +131,24 @@ def test_tune_ctgan_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert any(col.startswith("x_cat__") for col in DummyCtganGenerative.created[0].train_df.columns)
 
 
+def test_tune_ctgan_uses_300_epochs_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+    )
+
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 300
+
+
 def test_tune_ctgan_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []
@@ -188,6 +206,26 @@ def test_tune_ctgan_and_return_params_wrapper(tmp_path, monkeypatch):
     assert set(out.keys()) == {"best_params", "best_value", "best_source", "summary_path"}
     assert isinstance(out["best_params"], dict)
     assert Path(out["summary_path"]).exists()
+
+
+def test_select_ctgan_best_params_wrapper_returns_only_selection_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+
+    out = tune_mod.select_ctgan_best_params(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="my ds",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=1,
+        seed=13,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+    )
+
+    assert set(out.keys()) == {"best_params", "best_value", "best_source"}
+    assert isinstance(out["best_params"], dict)
 
 
 def test_tune_ctgan_regression_branch_scales_target_and_keeps_it_continuous(tmp_path, monkeypatch):

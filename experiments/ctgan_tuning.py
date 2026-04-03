@@ -47,6 +47,7 @@ import optuna
 import pandas as pd
 
 from experiments.ctgan_common import (
+    DEFAULT_CTGAN_EPOCHS,
     build_ctgan_kwargs,
     build_preprocess_pipeline,
     default_discrete_cols,
@@ -224,7 +225,7 @@ def tune_ctgan(
     dataset: str,
     encoding_method: str,
     n_trials: int = 30,
-    epochs: int = 50,
+    epochs: int = DEFAULT_CTGAN_EPOCHS,
     seed: int = 42,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
@@ -396,8 +397,22 @@ def tune_ctgan_and_return_params(**kwargs: Any) -> Dict[str, Any]:
     """
     result = tune_ctgan(**kwargs)
     return {
+        **select_ctgan_best_params_from_result(result),
+        "summary_path": str(result.summary_path),
+    }
+
+
+def select_ctgan_best_params_from_result(result: CtganTuningResult) -> Dict[str, Any]:
+    return {
         "best_params": result.best_params,
         "best_value": result.best_value,
         "best_source": result.best_source,
-        "summary_path": str(result.summary_path),
     }
+
+
+def select_ctgan_best_params(**kwargs: Any) -> Dict[str, Any]:
+    """
+    Run the tuning stage and return only the selected hyperparameters contract.
+    """
+    result = tune_ctgan(**kwargs)
+    return select_ctgan_best_params_from_result(result)
