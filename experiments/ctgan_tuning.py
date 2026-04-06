@@ -165,7 +165,13 @@ def _build_holdout(
         encoding_method=encoding_method,
         task_type=task_type,
     )
-    dm = TabularDataModule(df=df, schema=schema, transforms=pipeline, validate=True)
+    dm = TabularDataModule(
+        df=df,
+        schema=schema,
+        transforms=pipeline,
+        unseen_category_policy="move_to_train",
+        validate=True,
+    )
     dm.prepare_holdout(holdout_cfg)
     holdout = dm.get_holdout()
     train_df, val_df = holdout.train, holdout.val

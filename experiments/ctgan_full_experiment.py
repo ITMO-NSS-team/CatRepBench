@@ -184,11 +184,19 @@ def _prepare_fold_data(
         encoding_method=encoding_method,
         task_type=task_type,
     )
-    dm = TabularDataModule(df=df, schema=schema, transforms=pipeline, validate=True)
+    dm = TabularDataModule(
+        df=df,
+        schema=schema,
+        transforms=pipeline,
+        unseen_category_policy="move_to_train",
+        validate=True,
+    )
     dm.prepare_kfold(split_cfg)
     fold = dm.get_fold(fold_id)
-    train_raw = dm.df_clean.iloc[dm._kfold_splits[fold_id].train_idx].copy().reset_index(drop=True)  # type: ignore[index]
-    test_raw = dm.df_clean.iloc[dm._kfold_splits[fold_id].test_idx].copy().reset_index(drop=True)  # type: ignore[index]
+    if fold.train_raw is None or fold.test_raw is None:
+        raise RuntimeError("FoldData must include raw train/test data.")
+    train_raw = fold.train_raw.reset_index(drop=True)
+    test_raw = fold.test_raw.reset_index(drop=True)
     train_df = fold.train.reset_index(drop=True)
     test_df = fold.test.reset_index(drop=True)
     transformed_schema = TabularSchema.infer_from_dataframe(
