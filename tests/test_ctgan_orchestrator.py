@@ -2,6 +2,7 @@ import io
 import json
 import subprocess
 import sys
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import experiments.ctgan_orchestrator as orchestrator_mod
@@ -251,6 +252,73 @@ def test_orchestrator_classifies_signal_terminated_failures(monkeypatch, tmp_pat
     assert out.exit_code != 0
     assert fake_sheets.last_payload.status == "failed"
     assert "terminated by signal 9" in fake_sheets.last_payload.note
+
+
+def test_build_runner_argv_passes_common_best_params_file_skip_tuning_and_device(tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    best_params_file = tmp_path / "best_params.json"
+    best_params_file.write_text("{}", encoding="utf-8")
+    dataset = SimpleNamespace(dataset_id="openml_adult", label="adult")
+    encoding = SimpleNamespace(encoding_id="one_hot_representation", label="one-hot")
+
+    argv = orchestrator_mod._build_runner_argv(
+        manifest_path=manifest_path,
+        dataset=dataset,
+        encoding=encoding,
+        output_root=tmp_path / "results",
+        best_params_file=best_params_file,
+        skip_tuning=True,
+        device="cuda",
+    )
+
+    assert "--best-params-file" in argv
+    assert str(best_params_file.resolve()) in argv
+    assert "--skip-tuning" in argv
+    assert argv[-2:] == ["--device", "cuda"]
+
+
+def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    best_params_file = tmp_path / "best_params.json"
+    best_params_file.write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    @dataclass(frozen=True)
+    class DummySheetsConfig:
+        worksheet_name: str = "CTGAN"
+
+    def fake_from_env():
+        return DummySheetsConfig()
+
+    def fake_sheets_client(config):
+        return object()
+
+    def fake_run_once(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(exit_code=0)
+
+    monkeypatch.setattr(orchestrator_mod.SheetsConfig, "from_env", staticmethod(fake_from_env))
+    monkeypatch.setattr(orchestrator_mod, "SheetsClient", fake_sheets_client)
+    monkeypatch.setattr(orchestrator_mod, "run_once", fake_run_once)
+
+    exit_code = orchestrator_mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--worksheet",
+            "CTGAN",
+            "--best-params-file",
+            str(best_params_file),
+            "--skip-tuning",
+            "--device",
+            "cuda",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["best_params_file"] == best_params_file.resolve()
+    assert captured["skip_tuning"] is True
+    assert captured["device"] == "cuda"
 
 
 def test_orchestrator_cli_help_runs_as_script():

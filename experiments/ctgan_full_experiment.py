@@ -105,6 +105,21 @@ def _save_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(_jsonify(payload), handle, ensure_ascii=False, indent=2)
 
 
+def _load_best_params_file(path: Path | str) -> dict[str, Any]:
+    best_params_path = Path(path).resolve()
+    with best_params_path.open("r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if not isinstance(payload, dict):
+        raise ValueError("best_params_file must contain a JSON object.")
+
+    best_params = payload.get("best_params", payload)
+    if not isinstance(best_params, dict):
+        raise ValueError("best_params_file must provide a JSON object in 'best_params' or at top level.")
+
+    return {str(key): value for key, value in best_params.items()}
+
+
 def _emit_progress(
     *,
     stage: str,
@@ -330,11 +345,16 @@ def run_full_ctgan_experiment(
     output_root: Path | str = Path("experiments/results"),
     progress_stream: TextIO | None = None,
     progress_format: str = "jsonl",
+    best_params_file: Path | str | None = None,
+    skip_tuning: bool = False,
     device: str = "cuda",
 ) -> FullCtganExperimentResult:
     manifest_path = Path(manifest_path).resolve()
     project_root = _infer_project_root(manifest_path)
     run_dir = _ensure_dir(Path(output_root) / "ctgan" / dataset_id / encoding_method)
+
+    if skip_tuning and best_params_file is None:
+        raise ValueError("skip_tuning requires best_params_file.")
 
     _emit_progress(
         stage="launching",
@@ -371,22 +391,29 @@ def run_full_ctgan_experiment(
 
     _emit_progress(
         stage="tuning",
-        message="tuning ctgan",
+        message="tuning ctgan" if best_params_file is None else "skipping tuning; using provided best params",
         progress_stream=progress_stream,
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
     )
     tuning_output_dir = run_dir / "tuning"
-    tuning_result = select_ctgan_best_params(
-        df=df,
-        schema=schema,
-        dataset=dataset.label,
-        encoding_method=encoding_method,
-        task_type=_task_type_from_flag(is_regression),
-        output_dir=tuning_output_dir,
-        device=device,
-    )
+    if best_params_file is not None:
+        tuning_result = {
+            "best_params": _load_best_params_file(best_params_file),
+            "best_value": None,
+            "best_source": "provided_file",
+        }
+    else:
+        tuning_result = select_ctgan_best_params(
+            df=df,
+            schema=schema,
+            dataset=dataset.label,
+            encoding_method=encoding_method,
+            task_type=_task_type_from_flag(is_regression),
+            output_dir=tuning_output_dir,
+            device=device,
+        )
 
     _emit_progress(
         stage="crossval",
@@ -485,6 +512,7 @@ def run_full_ctgan_experiment(
                 "best_params": dict(tuning_result["best_params"]),
                 "best_value": tuning_result["best_value"],
                 "best_source": tuning_result["best_source"],
+                "best_params_file": str(Path(best_params_file).resolve()) if best_params_file is not None else None,
             },
             "crossval": {
                 "n_folds": 5,
@@ -510,6 +538,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--encoding-method", required=True)
     parser.add_argument("--output-root", default=str(Path("experiments/results")))
     parser.add_argument("--progress-format", default="jsonl")
+    parser.add_argument("--best-params-file")
+    parser.add_argument("--skip-tuning", action="store_true")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args(argv)
 
@@ -521,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
         output_root=args.output_root,
         progress_stream=sys.stdout,
         progress_format=args.progress_format,
+        best_params_file=Path(args.best_params_file).resolve() if args.best_params_file else None,
+        skip_tuning=args.skip_tuning,
         device=args.device,
     )
     return 0

@@ -79,6 +79,9 @@ def run_once(
     dry_run: bool = False,
     heartbeat_seconds: int = 120,
     output_root: Path | str = _DEFAULT_OUTPUT_ROOT,
+    best_params_file: Path | str | None = None,
+    skip_tuning: bool = False,
+    device: str = "cuda",
 ) -> OrchestratorRunResult:
     del worksheet_name
 
@@ -117,6 +120,9 @@ def run_once(
                 dataset=dataset,
                 encoding=encoding,
                 output_root=Path(output_root),
+                best_params_file=Path(best_params_file).resolve() if best_params_file is not None else None,
+                skip_tuning=skip_tuning,
+                device=device,
             )
         )
 
@@ -202,6 +208,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--worksheet", required=True)
     parser.add_argument("--output-root", default=str(_DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--heartbeat-seconds", type=int, default=120)
+    parser.add_argument("--best-params-file")
+    parser.add_argument("--skip-tuning", action="store_true")
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -215,6 +224,9 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         heartbeat_seconds=args.heartbeat_seconds,
         output_root=args.output_root,
+        best_params_file=Path(args.best_params_file).resolve() if args.best_params_file else None,
+        skip_tuning=args.skip_tuning,
+        device=args.device,
     )
     return result.exit_code
 
@@ -482,8 +494,11 @@ def _build_runner_argv(
     dataset: DatasetEntry,
     encoding: EncodingEntry,
     output_root: Path,
+    best_params_file: Path | None,
+    skip_tuning: bool,
+    device: str,
 ) -> list[str]:
-    return [
+    argv = [
         sys.executable,
         "experiments/ctgan_full_experiment.py",
         "--manifest",
@@ -499,6 +514,12 @@ def _build_runner_argv(
         "--progress-format",
         "jsonl",
     ]
+    if best_params_file is not None:
+        argv.extend(["--best-params-file", str(best_params_file)])
+    if skip_tuning:
+        argv.append("--skip-tuning")
+    argv.extend(["--device", device])
+    return argv
 
 
 def _build_payload(

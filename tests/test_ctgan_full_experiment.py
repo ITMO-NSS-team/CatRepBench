@@ -71,6 +71,27 @@ def write_runner_csv(
     ).to_csv(data_dir / f"{dataset_id}.csv", index=False)
 
 
+def write_best_params_file(tmp_path: Path) -> Path:
+    path = tmp_path / "best_params.json"
+    path.write_text(
+        json.dumps(
+            {
+                "best_params": {
+                    "embedding_dim": 256,
+                    "gen_dim": 512,
+                    "disc_dim": 256,
+                    "batch_size": 1024,
+                    "discriminator_steps": 3,
+                    "generator_lr": 5e-4,
+                    "lr_ratio": 1.2,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 class DummyCtganGenerative:
     created: list["DummyCtganGenerative"] = []
 
@@ -363,6 +384,58 @@ def test_run_full_experiment_marks_original_corr_unsupported_for_non_invertible_
     assert fold_payload["distribution"]["corr_frobenius_original_status"] == "unsupported_not_invertible"
 
 
+def test_run_full_experiment_uses_best_params_file_and_skips_tuning(tmp_path, monkeypatch):
+    manifest_path = write_runner_manifest(tmp_path)
+    write_runner_csv(tmp_path)
+    best_params_file = write_best_params_file(tmp_path)
+    DummyCtganGenerative.created = []
+    monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
+    monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+
+    def fail_select(**kwargs):
+        raise AssertionError("tuning should not run when best_params_file is provided")
+
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fail_select)
+
+    result = full_mod.run_full_ctgan_experiment(
+        manifest_path=manifest_path,
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        output_root=tmp_path / "results",
+        best_params_file=best_params_file,
+        skip_tuning=True,
+        device="cpu",
+    )
+
+    payload = json.loads((result.output_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert payload["tuning"]["best_source"] == "provided_file"
+    assert payload["tuning"]["best_params"]["batch_size"] == 1024
+    assert payload["tuning"]["best_params_file"] == str(best_params_file)
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["batch_size"] == 1024
+
+
+def test_run_full_experiment_rejects_skip_tuning_without_best_params_file(tmp_path):
+    manifest_path = write_runner_manifest(tmp_path)
+    write_runner_csv(tmp_path)
+
+    try:
+        full_mod.run_full_ctgan_experiment(
+            manifest_path=manifest_path,
+            dataset_id="openml_adult",
+            dataset_label="adult",
+            encoding_method="one_hot_representation",
+            output_root=tmp_path / "results",
+            skip_tuning=True,
+            device="cpu",
+        )
+    except ValueError as exc:
+        assert "best_params_file" in str(exc)
+    else:
+        raise AssertionError("Expected skip_tuning without best_params_file to raise ValueError")
+
+
 def test_cli_emits_progress_jsonl(capsys, monkeypatch, tmp_path):
     manifest_path = write_runner_manifest(tmp_path)
     monkeypatch.setattr(full_mod, "run_full_ctgan_experiment", fake_run_full_experiment)
@@ -390,6 +463,42 @@ def test_cli_emits_progress_jsonl(capsys, monkeypatch, tmp_path):
     assert exit_code == 0
     assert '"stage": "tuning"' in captured.out
     assert '"stage": "saving"' in captured.out
+
+
+def test_cli_passes_best_params_file_and_skip_tuning(monkeypatch, tmp_path):
+    manifest_path = write_runner_manifest(tmp_path)
+    best_params_file = write_best_params_file(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return fake_run_full_experiment(**kwargs)
+
+    monkeypatch.setattr(full_mod, "run_full_ctgan_experiment", fake_runner)
+
+    exit_code = full_mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--dataset-id",
+            "openml_adult",
+            "--dataset-label",
+            "adult",
+            "--encoding-method",
+            "one_hot_representation",
+            "--output-root",
+            str(tmp_path / "results"),
+            "--best-params-file",
+            str(best_params_file),
+            "--skip-tuning",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["best_params_file"] == best_params_file
+    assert captured["skip_tuning"] is True
 
 
 def test_full_experiment_cli_help_runs_as_script():

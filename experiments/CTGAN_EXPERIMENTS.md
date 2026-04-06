@@ -45,6 +45,10 @@ pip install -r requirements.txt
 
 The raw CSV datasets must exist under `datasets/raw/`.
 
+```bash
+python scripts/get_datasets.py
+```
+
 ### 4. Create and share Google Sheets credentials
 
 Use a Google service account with access to the experiment spreadsheet.
