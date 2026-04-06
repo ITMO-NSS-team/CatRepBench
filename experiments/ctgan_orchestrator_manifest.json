@@ -167,14 +167,6 @@
     {
       "label": "sum",
       "encoding_id": "sum_representation"
-    },
-    {
-      "label": "gel",
-      "encoding_id": "gel_representation"
-    },
-    {
-      "label": "similarity",
-      "encoding_id": "similarity_representation"
     }
   ]
 }
