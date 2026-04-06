@@ -22,7 +22,7 @@ from experiments.ctgan_manifest import load_ctgan_manifest
 from experiments.ctgan_tuning import select_ctgan_best_params
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
-from genbench.data.splits import SplitConfigKFold
+from genbench.data.splits import SplitConfigHoldout, SplitConfigKFold
 from genbench.evaluation.distribution.corr_frobenius import CorrelationFrobeniusMetric
 from genbench.evaluation.distribution.marginal_kl import MarginalKLDivergenceMetric
 from genbench.evaluation.distribution.wasserstein import WassersteinDistanceMetric
@@ -164,6 +164,16 @@ def _aggregate_numeric_records(records: list[dict[str, Any]]) -> dict[str, dict[
     return aggregate
 
 
+def _cap_dataframe_rows(df: pd.DataFrame, *, max_rows: int | None) -> pd.DataFrame:
+    if max_rows is None:
+        return df.reset_index(drop=True)
+    if max_rows <= 1:
+        raise ValueError("max_rows must be > 1.")
+    if len(df) <= max_rows:
+        return df.reset_index(drop=True)
+    return df.sample(n=max_rows, random_state=42).sort_index().reset_index(drop=True)
+
+
 def _prepare_fold_data(
     *,
     df: pd.DataFrame,
@@ -212,6 +222,55 @@ def _prepare_fold_data(
         test_transformed=test_df,
         transformed_schema=transformed_schema,
         transforms=fold.transforms,
+    )
+
+
+def _prepare_holdout_data(
+    *,
+    df: pd.DataFrame,
+    schema: TabularSchema,
+    encoding_method: str,
+    is_regression: bool | None,
+) -> PreparedFoldData:
+    task_type = None
+    if is_regression is True:
+        task_type = "regression"
+    elif is_regression is False:
+        task_type = "classification"
+
+    pipeline, _ = build_preprocess_pipeline(
+        schema=schema,
+        encoding_method=encoding_method,
+        task_type=task_type,
+    )
+    dm = TabularDataModule(
+        df=df,
+        schema=schema,
+        transforms=pipeline,
+        unseen_category_policy="move_to_train",
+        validate=True,
+    )
+    dm.prepare_holdout(SplitConfigHoldout(val_size=0.2, shuffle=True, random_seed=42))
+    holdout = dm.get_holdout()
+    if holdout.train_raw is None or holdout.val_raw is None:
+        raise RuntimeError("HoldoutData must include raw train/val data.")
+    train_raw = holdout.train_raw.reset_index(drop=True)
+    test_raw = holdout.val_raw.reset_index(drop=True)
+    train_df = holdout.train.reset_index(drop=True)
+    test_df = holdout.val.reset_index(drop=True)
+    transformed_schema = TabularSchema.infer_from_dataframe(
+        train_df,
+        target_col=schema.target_col,
+        id_col=schema.id_col,
+    )
+    transformed_schema.validate(test_df)
+    return PreparedFoldData(
+        train_raw=train_raw,
+        test_raw=test_raw,
+        train_transformed=train_df,
+        test_transformed=test_df,
+        transformed_schema=transformed_schema,
+        transforms=holdout.transforms,
     )
 
 
@@ -284,6 +343,56 @@ def _compute_tstr_scores(
     return {"status": "ok", **scores}
 
 
+def _evaluate_prepared_split(
+    *,
+    split_id: int,
+    split_data: PreparedFoldData,
+    schema: TabularSchema,
+    best_params: dict[str, Any],
+    device: str,
+    is_regression: bool | None,
+) -> dict[str, Any]:
+    ctgan_kwargs = build_ctgan_kwargs(best_params, epochs=DEFAULT_CTGAN_EPOCHS, device=device)
+    discrete_cols = default_discrete_cols(
+        schema=split_data.transformed_schema,
+        train_df=split_data.train_transformed,
+        include_target_for_classification=(is_regression is False),
+    )
+    model = CtganGenerative(discrete_cols=discrete_cols, ctgan_kwargs=ctgan_kwargs)
+    model.fit(split_data.train_transformed, split_data.transformed_schema)
+    synth_df = model.sample(len(split_data.train_transformed)).reset_index(drop=True)
+
+    distribution_scores = _compute_distribution_scores(
+        test_df=split_data.test_transformed,
+        synth_df=synth_df,
+        transformed_schema=split_data.transformed_schema,
+    )
+    corr_original_value, corr_original_status = _compute_original_space_corr(
+        test_raw=split_data.test_raw,
+        synth_df=synth_df,
+        schema=schema,
+        transforms=split_data.transforms,
+    )
+    distribution_scores["corr_frobenius_original"] = corr_original_value
+    distribution_scores["corr_frobenius_original_status"] = corr_original_status
+
+    tstr_scores = _compute_tstr_scores(
+        train_df=split_data.train_transformed,
+        test_df=split_data.test_transformed,
+        synth_df=synth_df,
+        transformed_schema=split_data.transformed_schema,
+        is_regression=is_regression,
+    )
+
+    return {
+        "fold_id": int(split_id),
+        "n_train": int(len(split_data.train_transformed)),
+        "n_test": int(len(split_data.test_transformed)),
+        "distribution": distribution_scores,
+        "utility": tstr_scores,
+    }
+
+
 def _run_crossval_fold(
     *,
     fold_id: int,
@@ -303,45 +412,39 @@ def _run_crossval_fold(
         split_cfg=split_cfg,
         fold_id=fold_id,
     )
-    ctgan_kwargs = build_ctgan_kwargs(best_params, epochs=DEFAULT_CTGAN_EPOCHS, device=device)
-    discrete_cols = default_discrete_cols(
-        schema=fold_data.transformed_schema,
-        train_df=fold_data.train_transformed,
-        include_target_for_classification=(is_regression is False),
-    )
-    model = CtganGenerative(discrete_cols=discrete_cols, ctgan_kwargs=ctgan_kwargs)
-    model.fit(fold_data.train_transformed, fold_data.transformed_schema)
-    synth_df = model.sample(len(fold_data.train_transformed)).reset_index(drop=True)
-
-    distribution_scores = _compute_distribution_scores(
-        test_df=fold_data.test_transformed,
-        synth_df=synth_df,
-        transformed_schema=fold_data.transformed_schema,
-    )
-    corr_original_value, corr_original_status = _compute_original_space_corr(
-        test_raw=fold_data.test_raw,
-        synth_df=synth_df,
+    return _evaluate_prepared_split(
+        split_id=fold_id,
+        split_data=fold_data,
         schema=schema,
-        transforms=fold_data.transforms,
-    )
-    distribution_scores["corr_frobenius_original"] = corr_original_value
-    distribution_scores["corr_frobenius_original_status"] = corr_original_status
-
-    tstr_scores = _compute_tstr_scores(
-        train_df=fold_data.train_transformed,
-        test_df=fold_data.test_transformed,
-        synth_df=synth_df,
-        transformed_schema=fold_data.transformed_schema,
+        best_params=best_params,
+        device=device,
         is_regression=is_regression,
     )
 
-    return {
-        "fold_id": int(fold_id),
-        "n_train": int(len(fold_data.train_transformed)),
-        "n_test": int(len(fold_data.test_transformed)),
-        "distribution": distribution_scores,
-        "utility": tstr_scores,
-    }
+
+def _run_holdout_split(
+    *,
+    df: pd.DataFrame,
+    schema: TabularSchema,
+    encoding_method: str,
+    best_params: dict[str, Any],
+    device: str,
+    is_regression: bool | None,
+) -> dict[str, Any]:
+    holdout_data = _prepare_holdout_data(
+        df=df,
+        schema=schema,
+        encoding_method=encoding_method,
+        is_regression=is_regression,
+    )
+    return _evaluate_prepared_split(
+        split_id=0,
+        split_data=holdout_data,
+        schema=schema,
+        best_params=best_params,
+        device=device,
+        is_regression=is_regression,
+    )
 
 
 def run_full_ctgan_experiment(
@@ -356,6 +459,8 @@ def run_full_ctgan_experiment(
     best_params_file: Path | str | None = None,
     skip_tuning: bool = False,
     device: str = "cuda",
+    poster_fast: bool = False,
+    max_rows: int | None = None,
 ) -> FullCtganExperimentResult:
     manifest_path = Path(manifest_path).resolve()
     project_root = _infer_project_root(manifest_path)
@@ -386,7 +491,9 @@ def run_full_ctgan_experiment(
             f"encoding_method mismatch: expected {encoding.encoding_id!r}, got {encoding_method!r}"
         )
 
+    effective_max_rows = 10_000 if poster_fast and max_rows is None else max_rows
     df = pd.read_csv(project_root / "datasets" / "raw" / f"{dataset_id}.csv")
+    df = _cap_dataframe_rows(df, max_rows=effective_max_rows if poster_fast else None)
     schema = TabularSchema.infer_from_dataframe(
         df,
         target_col=dataset.target_col,
@@ -433,7 +540,7 @@ def run_full_ctgan_experiment(
 
     _emit_progress(
         stage="crossval",
-        message="running cross-validation",
+        message="running poster-fast holdout" if poster_fast else "running cross-validation",
         progress_stream=progress_stream,
         progress_format=progress_format,
         dataset_id=dataset_id,
@@ -441,9 +548,8 @@ def run_full_ctgan_experiment(
     )
     per_fold_dir = _ensure_dir(run_dir / "crossval" / "per_fold")
     fold_results: list[dict[str, Any]] = []
-    for fold_id in range(5):
-        fold_payload = _run_crossval_fold(
-            fold_id=fold_id,
+    if poster_fast:
+        fold_payload = _run_holdout_split(
             df=df,
             schema=schema,
             encoding_method=encoding_method,
@@ -452,7 +558,22 @@ def run_full_ctgan_experiment(
             is_regression=is_regression,
         )
         fold_results.append(fold_payload)
-        _save_json(per_fold_dir / f"fold_{fold_id}.json", fold_payload)
+        _save_json(per_fold_dir / "fold_0.json", fold_payload)
+        n_folds = 1
+    else:
+        for fold_id in range(5):
+            fold_payload = _run_crossval_fold(
+                fold_id=fold_id,
+                df=df,
+                schema=schema,
+                encoding_method=encoding_method,
+                best_params=dict(tuning_result["best_params"]),
+                device=device,
+                is_regression=is_regression,
+            )
+            fold_results.append(fold_payload)
+            _save_json(per_fold_dir / f"fold_{fold_id}.json", fold_payload)
+        n_folds = 5
 
     _emit_progress(
         stage="metrics",
@@ -487,7 +608,7 @@ def run_full_ctgan_experiment(
         "dataset_id": dataset_id,
         "dataset_label": dataset_label,
         "encoding_method": encoding_method,
-        "n_folds": 5,
+        "n_folds": n_folds,
         "distribution": _aggregate_numeric_records(distribution_records),
         "tstr": {
             "status": utility_status,
@@ -522,6 +643,11 @@ def run_full_ctgan_experiment(
                 "target_col": schema.target_col,
                 "id_col": schema.id_col,
             },
+            "poster_fast": {
+                "enabled": poster_fast,
+                "max_rows": effective_max_rows if poster_fast else None,
+                "effective_rows": int(len(df)),
+            },
             "tuning": {
                 "output_dir": tuning_output_dir,
                 "summary_path": tuning_output_dir / "summary.json",
@@ -531,7 +657,7 @@ def run_full_ctgan_experiment(
                 "best_params_file": str(Path(best_params_file).resolve()) if best_params_file is not None else None,
             },
             "crossval": {
-                "n_folds": 5,
+                "n_folds": n_folds,
                 "per_fold_dir": per_fold_dir,
             },
             "metrics_path": aggregate_metrics_path,
@@ -556,6 +682,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--progress-format", default="jsonl")
     parser.add_argument("--best-params-file")
     parser.add_argument("--skip-tuning", action="store_true")
+    parser.add_argument("--poster-fast", action="store_true")
+    parser.add_argument("--max-rows", type=int)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args(argv)
 
@@ -570,6 +698,8 @@ def main(argv: list[str] | None = None) -> int:
         best_params_file=Path(args.best_params_file).resolve() if args.best_params_file else None,
         skip_tuning=args.skip_tuning,
         device=args.device,
+        poster_fast=args.poster_fast,
+        max_rows=args.max_rows,
     )
     return 0
 

@@ -58,15 +58,16 @@ def write_runner_csv(
     *,
     dataset_id: str = "openml_adult",
     target_col: str = "target",
+    n_rows: int = 10,
 ) -> None:
     data_dir = tmp_path / "datasets" / "raw"
     data_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         {
-            "x_cont": [0.1 * i for i in range(10)],
-            "x_disc": [i % 2 for i in range(10)],
-            "x_cat": ["a" if i % 2 == 0 else "b" for i in range(10)],
-            target_col: [0.15 * i + 0.03 for i in range(10)],
+            "x_cont": [0.1 * i for i in range(n_rows)],
+            "x_disc": [i % 2 for i in range(n_rows)],
+            "x_cat": ["a" if i % 2 == 0 else "b" for i in range(n_rows)],
+            target_col: [0.15 * i + 0.03 for i in range(n_rows)],
         }
     ).to_csv(data_dir / f"{dataset_id}.csv", index=False)
 
@@ -424,6 +425,43 @@ def test_run_full_experiment_uses_best_params_file_and_skips_tuning(tmp_path, mo
     ]
 
 
+def test_run_full_experiment_poster_fast_uses_single_holdout_and_caps_rows(tmp_path, monkeypatch):
+    manifest_path = write_runner_manifest(tmp_path)
+    write_runner_csv(tmp_path, n_rows=20)
+    best_params_file = write_best_params_file(tmp_path)
+    DummyCtganGenerative.created = []
+    monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
+    monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params)
+
+    result = full_mod.run_full_ctgan_experiment(
+        manifest_path=manifest_path,
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        output_root=tmp_path / "results",
+        best_params_file=best_params_file,
+        skip_tuning=True,
+        poster_fast=True,
+        max_rows=5,
+        device="cpu",
+    )
+
+    payload = json.loads((result.output_dir / "run_summary.json").read_text(encoding="utf-8"))
+    aggregate_payload = json.loads((result.output_dir / "metrics" / "aggregate.json").read_text(encoding="utf-8"))
+    fold_payload = json.loads((result.output_dir / "crossval" / "per_fold" / "fold_0.json").read_text(encoding="utf-8"))
+    assert payload["poster_fast"]["enabled"] is True
+    assert payload["poster_fast"]["max_rows"] == 5
+    assert payload["poster_fast"]["effective_rows"] == 5
+    assert payload["crossval"]["n_folds"] == 1
+    assert aggregate_payload["n_folds"] == 1
+    assert fold_payload["n_train"] + fold_payload["n_test"] == 5
+    assert aggregate_payload["distribution"]["wasserstein_mean"]["std"] == 0.0
+    assert aggregate_payload["distribution"]["marginal_kl_mean"]["std"] == 0.0
+    assert aggregate_payload["distribution"]["corr_frobenius_transformed"]["std"] == 0.0
+    assert aggregate_payload["distribution"]["corr_frobenius_original"]["std"] == 0.0
+
+
 def test_run_full_experiment_rejects_skip_tuning_without_best_params_file(tmp_path):
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
@@ -507,6 +545,41 @@ def test_cli_passes_best_params_file_and_skip_tuning(monkeypatch, tmp_path):
     assert exit_code == 0
     assert captured["best_params_file"] == best_params_file
     assert captured["skip_tuning"] is True
+
+
+def test_cli_passes_poster_fast_and_max_rows(monkeypatch, tmp_path):
+    manifest_path = write_runner_manifest(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return fake_run_full_experiment(**kwargs)
+
+    monkeypatch.setattr(full_mod, "run_full_ctgan_experiment", fake_runner)
+
+    exit_code = full_mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--dataset-id",
+            "openml_adult",
+            "--dataset-label",
+            "adult",
+            "--encoding-method",
+            "one_hot_representation",
+            "--output-root",
+            str(tmp_path / "results"),
+            "--poster-fast",
+            "--max-rows",
+            "5",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["poster_fast"] is True
+    assert captured["max_rows"] == 5
 
 
 def test_full_experiment_cli_help_runs_as_script():
