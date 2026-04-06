@@ -62,6 +62,16 @@ def test_timestamp_ordering_is_rejected_when_finished_precedes_heartbeat():
         )
 
 
+def test_skipped_cell_is_terminal_and_not_claimable():
+    payload = parse_cell_payload(
+        '{"v":1,"status":"skipped","run_id":"r1","owner":"h:p:0","started_at":"2026-04-02T00:00:00Z","heartbeat_at":"2026-04-02T00:10:00Z","finished_at":"2026-04-02T00:11:00Z","stage":"skipped","note":"aliased to B2: no categorical features"}'
+    )
+    now = datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc)
+    assert payload.status == "skipped"
+    assert payload.stage == "skipped"
+    assert payload.is_claimable(now=now) is False
+
+
 def test_find_first_claimable_cell_scans_left_to_right_then_top_to_bottom():
     coord = find_first_claimable_cell(
         dataset_headers=["adult", "bank-marketing"],

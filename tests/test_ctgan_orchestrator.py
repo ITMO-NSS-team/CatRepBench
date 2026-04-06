@@ -62,15 +62,31 @@ def _payload(
 
 
 class FakeSheetsClient:
-    def __init__(self, *, reread_value=None):
+    def __init__(self, *, matrix=None, reread_value=None):
         self.write_calls = []
         self._raw_write_calls = []
         self.last_payload = None
         self._reread_value = reread_value
+        self._matrix = matrix or {
+            "dataset_headers": ["adult"],
+            "encoding_headers": ["one-hot"],
+            "cell_values": {"B2": " "},
+        }
+        self._cell_values = dict(self._matrix["cell_values"])
 
     @classmethod
     def single_not_started_cell(cls):
         return cls()
+
+    @classmethod
+    def two_not_started_cells(cls):
+        return cls(
+            matrix={
+                "dataset_headers": ["adult", "bank-marketing"],
+                "encoding_headers": ["one-hot"],
+                "cell_values": {"B2": " ", "C2": " "},
+            }
+        )
 
     @classmethod
     def ambiguous_claim(cls):
@@ -86,17 +102,16 @@ class FakeSheetsClient:
         )
 
     def read_matrix(self):
-        cell_value = " " if not self._raw_write_calls else self._raw_write_calls[-1]
         return {
-            "dataset_headers": ["adult"],
-            "encoding_headers": ["one-hot"],
-            "cell_values": {"B2": cell_value},
+            "dataset_headers": list(self._matrix["dataset_headers"]),
+            "encoding_headers": list(self._matrix["encoding_headers"]),
+            "cell_values": dict(self._cell_values),
         }
 
     def read_cell(self, coord):
         if self._reread_value is not None and self._raw_write_calls:
             return self._reread_value
-        return " " if not self._raw_write_calls else self._raw_write_calls[-1]
+        return self._cell_values.get(coord, " ")
 
     def write_cell(self, coord, payload):
         if isinstance(payload, str):
@@ -108,6 +123,7 @@ class FakeSheetsClient:
         parsed_payload = json.loads(raw_payload)
         self.last_payload = SimpleNamespace(**parsed_payload)
         self._raw_write_calls.append(raw_payload)
+        self._cell_values[coord] = raw_payload
         self.write_calls.append(self.last_payload)
 
 
@@ -366,6 +382,7 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
             "--best-params-file",
             str(best_params_file),
             "--skip-tuning",
+            "--continue-on-failure",
             "--device",
             "cuda",
         ]
@@ -374,7 +391,116 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
     assert exit_code == 0
     assert captured["best_params_file"] == best_params_file.resolve()
     assert captured["skip_tuning"] is True
+    assert captured["continue_on_failure"] is True
     assert captured["device"] == "cuda"
+
+
+def test_orchestrator_continue_on_failure_claims_next_job_and_keeps_going(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "label": "adult",
+                        "dataset_id": "openml_adult",
+                        "target_col": "class",
+                        "id_col": None,
+                    },
+                    {
+                        "label": "bank-marketing",
+                        "dataset_id": "openml_bank-marketing",
+                        "target_col": "class",
+                        "id_col": None,
+                    },
+                ],
+                "encodings": [
+                    {
+                        "label": "one-hot",
+                        "encoding_id": "one_hot_representation",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sheets = FakeSheetsClient.two_not_started_cells()
+    attempts = {"count": 0}
+
+    def spawn_runner_then_success(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return fake_failing_process_with_oom_output(*args, **kwargs)
+        return fake_success_process(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", spawn_runner_then_success)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+        continue_on_failure=True,
+    )
+
+    assert out.exit_code == 1
+    assert attempts["count"] == 2
+    assert any(payload.status == "failed" for payload in fake_sheets.write_calls)
+    assert any(payload.status == "done" for payload in fake_sheets.write_calls)
+
+
+def test_orchestrator_continue_on_failure_survives_launch_errors(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "label": "adult",
+                        "dataset_id": "openml_adult",
+                        "target_col": "class",
+                        "id_col": None,
+                    },
+                    {
+                        "label": "bank-marketing",
+                        "dataset_id": "openml_bank-marketing",
+                        "target_col": "class",
+                        "id_col": None,
+                    },
+                ],
+                "encodings": [
+                    {
+                        "label": "one-hot",
+                        "encoding_id": "one_hot_representation",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sheets = FakeSheetsClient.two_not_started_cells()
+    attempts = {"count": 0}
+
+    def spawn_runner_raise_then_success(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise OSError("temporary spawn failure")
+        return fake_success_process(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", spawn_runner_raise_then_success)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+        continue_on_failure=True,
+    )
+
+    assert out.exit_code == 1
+    assert attempts["count"] == 2
+    assert any(payload.status == "failed" for payload in fake_sheets.write_calls)
+    assert any(payload.status == "done" for payload in fake_sheets.write_calls)
 
 
 def test_orchestrator_cli_help_runs_as_script():

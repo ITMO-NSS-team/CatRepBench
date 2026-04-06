@@ -16,6 +16,7 @@ _STATUS_NOT_STARTED = "not-started"
 _STATUS_IN_PROGRESS = "in-progress"
 _STATUS_DONE = "done"
 _STATUS_FAILED = "failed"
+_STATUS_SKIPPED = "skipped"
 
 _STAGE_LAUNCHING = "launching"
 _STAGE_TUNING = "tuning"
@@ -24,6 +25,7 @@ _STAGE_METRICS = "metrics"
 _STAGE_SAVING = "saving"
 _STAGE_DONE = "done"
 _STAGE_FAILED = "failed"
+_STAGE_SKIPPED = "skipped"
 
 _IN_PROGRESS_STAGES = {
     _STAGE_LAUNCHING,
@@ -37,6 +39,7 @@ _STATUS_TO_STAGE = {
     _STATUS_IN_PROGRESS: _IN_PROGRESS_STAGES,
     _STATUS_DONE: {_STAGE_DONE},
     _STATUS_FAILED: {_STAGE_FAILED},
+    _STATUS_SKIPPED: {_STAGE_SKIPPED},
 }
 
 

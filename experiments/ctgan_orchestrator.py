@@ -84,6 +84,7 @@ def run_once(
     best_params_file: Path | str | None = None,
     skip_tuning: bool = False,
     device: str = "cuda",
+    continue_on_failure: bool = False,
 ) -> OrchestratorRunResult:
     del worksheet_name
 
@@ -94,6 +95,7 @@ def run_once(
     first_claimed_coord: str | None = None
     first_runner_argv: tuple[str, ...] | None = None
     claimed_jobs = 0
+    had_failures = False
 
     while True:
         snapshot = _load_snapshot(sheets.read_matrix(), manifest=manifest)
@@ -107,7 +109,7 @@ def run_once(
         )
         if claim_coord is None:
             return OrchestratorRunResult(
-                exit_code=0,
+                exit_code=1 if had_failures else 0,
                 claimed_coord=first_claimed_coord,
                 runner_argv=first_runner_argv,
                 claimed_jobs=claimed_jobs,
@@ -178,6 +180,10 @@ def run_once(
                 stage="failed",
                 note=f"launch failed: {exc}",
             )
+            had_failures = True
+            claimed_jobs += 1
+            if continue_on_failure:
+                continue
             return OrchestratorRunResult(
                 exit_code=1,
                 claimed_coord=claim_coord,
@@ -194,6 +200,10 @@ def run_once(
             heartbeat_seconds=heartbeat_seconds,
         )
         if exit_code != 0:
+            had_failures = True
+            if continue_on_failure:
+                claimed_jobs += 1
+                continue
             return OrchestratorRunResult(
                 exit_code=exit_code,
                 claimed_coord=claim_coord,
@@ -212,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--heartbeat-seconds", type=int, default=120)
     parser.add_argument("--best-params-file")
     parser.add_argument("--skip-tuning", action="store_true")
+    parser.add_argument("--continue-on-failure", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -229,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         best_params_file=Path(args.best_params_file).resolve() if args.best_params_file else None,
         skip_tuning=args.skip_tuning,
         device=args.device,
+        continue_on_failure=args.continue_on_failure,
     )
     return result.exit_code
 
