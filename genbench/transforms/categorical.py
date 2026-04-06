@@ -48,6 +48,8 @@ def list_registered_representations() -> list[str]:
     Return sorted representation ids accepted by CategoricalRepresentationTransform.
     """
     return sorted(_REPRESENTATION_REGISTRY.keys())
+
+
 @dataclass
 class CategoricalRepresentationTransform:
     """
