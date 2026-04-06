@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
-import select
+import queue
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -30,6 +30,8 @@ from experiments.ctgan_sheets import SheetsClient, SheetsConfig
 _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
 _HEARTBEAT_FAILURE_TIMEOUT_SECONDS = 15 * 60
 _FAILURE_OUTPUT_TAIL_LINES = 8
+_EOF = object()
+_STREAM_QUEUES: dict[int, queue.Queue[str | object]] = {}
 
 
 class SheetsClientProtocol(Protocol):
@@ -602,20 +604,36 @@ def _read_available_line(stream: TextIO | None, *, timeout_seconds: float) -> st
             time.sleep(timeout_seconds)
         return None
 
-    if hasattr(stream, "fileno"):
-        try:
-            fileno = stream.fileno()
-        except (io.UnsupportedOperation, OSError):
-            fileno = None
-        if fileno is not None:
-            ready, _, _ = select.select([stream], [], [], max(timeout_seconds, 0.0))
-            if not ready:
-                return None
-
-    line = stream.readline()
-    if line == "":
+    line_queue = _stream_line_queue(stream)
+    try:
+        line = line_queue.get(timeout=max(timeout_seconds, 0.0))
+    except queue.Empty:
         return None
-    return line
+
+    if line is _EOF:
+        _STREAM_QUEUES.pop(id(stream), None)
+        return None
+
+    return str(line)
+
+
+def _stream_line_queue(stream: TextIO) -> queue.Queue[str | object]:
+    stream_id = id(stream)
+    if stream_id in _STREAM_QUEUES:
+        return _STREAM_QUEUES[stream_id]
+
+    line_queue: queue.Queue[str | object] = queue.Queue()
+    _STREAM_QUEUES[stream_id] = line_queue
+
+    def _reader() -> None:
+        try:
+            for line in stream:
+                line_queue.put(line)
+        finally:
+            line_queue.put(_EOF)
+
+    threading.Thread(target=_reader, name=f"ctgan-runner-stdout-{stream_id}", daemon=True).start()
+    return line_queue
 
 
 def _stop_process(process: Any) -> None:

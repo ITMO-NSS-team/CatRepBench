@@ -391,6 +391,7 @@ def test_run_full_experiment_uses_best_params_file_and_skips_tuning(tmp_path, mo
     DummyCtganGenerative.created = []
     monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
     monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+    progress_stream = StringIO()
 
     def fail_select(**kwargs):
         raise AssertionError("tuning should not run when best_params_file is provided")
@@ -405,6 +406,7 @@ def test_run_full_experiment_uses_best_params_file_and_skips_tuning(tmp_path, mo
         output_root=tmp_path / "results",
         best_params_file=best_params_file,
         skip_tuning=True,
+        progress_stream=progress_stream,
         device="cpu",
     )
 
@@ -414,6 +416,12 @@ def test_run_full_experiment_uses_best_params_file_and_skips_tuning(tmp_path, mo
     assert payload["tuning"]["best_params_file"] == str(best_params_file)
     assert DummyCtganGenerative.created
     assert DummyCtganGenerative.created[0].ctgan_kwargs["batch_size"] == 1024
+    assert first_occurrence_order(progress_stages(progress_stream)) == [
+        "launching",
+        "crossval",
+        "metrics",
+        "saving",
+    ]
 
 
 def test_run_full_experiment_rejects_skip_tuning_without_best_params_file(tmp_path):

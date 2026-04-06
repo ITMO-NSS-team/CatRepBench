@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -163,6 +164,23 @@ def fake_signal_terminated_process(*args, **kwargs):
     )
 
 
+def fake_buffered_progress_process(*args, **kwargs):
+    read_fd, write_fd = os.pipe()
+    stdout = os.fdopen(read_fd, "r", encoding="utf-8")
+    with os.fdopen(write_fd, "w", encoding="utf-8") as writer:
+        writer.write('{"event":"progress","stage":"tuning","message":"started"}\n')
+        writer.write('{"event":"progress","stage":"crossval","message":"running cross-validation"}\n')
+        writer.flush()
+    return SimpleNamespace(
+        stdout=stdout,
+        poll=lambda: 0,
+        wait=lambda timeout=None: 0,
+        terminate=lambda: None,
+        kill=lambda: None,
+        returncode=0,
+    )
+
+
 def test_dry_run_reports_candidate_without_writing(monkeypatch, tmp_path):
     manifest_path = write_orchestrator_manifest(tmp_path)
     fake_sheets = FakeSheetsClient.single_not_started_cell()
@@ -217,6 +235,44 @@ def test_orchestrator_updates_heartbeat_while_process_is_alive(monkeypatch, tmp_
     )
     assert out.exit_code == 0
     assert any(payload.status == "in-progress" for payload in fake_sheets.write_calls)
+
+
+def test_orchestrator_does_not_miss_buffered_progress_lines(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    fake_sheets = FakeSheetsClient.single_not_started_cell()
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", fake_buffered_progress_process)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+    )
+
+    assert out.exit_code == 0
+    assert any(
+        payload.status == "in-progress" and payload.stage == "crossval"
+        for payload in fake_sheets.write_calls
+    )
+
+
+def test_read_available_line_drains_text_buffered_pipe():
+    read_fd, write_fd = os.pipe()
+    raw_stream = os.fdopen(read_fd, "rb")
+    stream = io.TextIOWrapper(raw_stream, encoding="utf-8", newline="")
+    writer = os.fdopen(write_fd, "wb", buffering=0)
+    try:
+        writer.write(b'{"event":"progress","stage":"tuning","message":"started"}\n')
+        writer.write(b'{"event":"progress","stage":"crossval","message":"running cross-validation"}\n')
+        writer.flush()
+
+        first = orchestrator_mod._read_available_line(stream, timeout_seconds=0)
+        second = orchestrator_mod._read_available_line(stream, timeout_seconds=0)
+    finally:
+        writer.close()
+
+    assert first is not None and '"stage":"tuning"' in first
+    assert second is not None and '"stage":"crossval"' in second
 
 
 def test_orchestrator_classifies_out_of_memory_failures(monkeypatch, tmp_path):

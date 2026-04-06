@@ -389,22 +389,30 @@ def run_full_ctgan_experiment(
     if dataset.target_col is not None:
         is_regression = bool(infer_is_regression_target(df[dataset.target_col]))
 
-    _emit_progress(
-        stage="tuning",
-        message="tuning ctgan" if best_params_file is None else "skipping tuning; using provided best params",
-        progress_stream=progress_stream,
-        progress_format=progress_format,
-        dataset_id=dataset_id,
-        encoding_method=encoding_method,
-    )
     tuning_output_dir = run_dir / "tuning"
     if best_params_file is not None:
+        _emit_progress(
+            stage="launching",
+            message="loading provided best params",
+            progress_stream=progress_stream,
+            progress_format=progress_format,
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+        )
         tuning_result = {
             "best_params": _load_best_params_file(best_params_file),
             "best_value": None,
             "best_source": "provided_file",
         }
     else:
+        _emit_progress(
+            stage="tuning",
+            message="tuning ctgan",
+            progress_stream=progress_stream,
+            progress_format=progress_format,
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+        )
         tuning_result = select_ctgan_best_params(
             df=df,
             schema=schema,
