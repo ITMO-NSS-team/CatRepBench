@@ -12,8 +12,11 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol, TextIO
+
+import pandas as pd
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -21,11 +24,11 @@ if __package__ in {None, ""}:
 from experiments.ctgan_manifest import CtganManifest, DatasetEntry, EncodingEntry, load_ctgan_manifest
 from experiments.ctgan_orchestrator_state import (
     CellPayload,
-    find_first_claimable_cell,
     parse_cell_payload,
     validate_worksheet_headers,
 )
 from experiments.ctgan_sheets import SheetsClient, SheetsConfig
+from genbench.data.schema import TabularSchema
 
 _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
 _HEARTBEAT_FAILURE_TIMEOUT_SECONDS = 15 * 60
@@ -85,6 +88,8 @@ def run_once(
     skip_tuning: bool = False,
     device: str = "cuda",
     continue_on_failure: bool = False,
+    poster_fast: bool = False,
+    max_rows: int | None = None,
 ) -> OrchestratorRunResult:
     del worksheet_name
 
@@ -99,12 +104,17 @@ def run_once(
 
     while True:
         snapshot = _load_snapshot(sheets.read_matrix(), manifest=manifest)
-        claim_coord = find_first_claimable_cell(
-            dataset_headers=snapshot.dataset_headers,
-            encoding_headers=snapshot.encoding_headers,
-            cell_values=snapshot.cell_values,
-            manifest_dataset_labels=tuple(entry.label for entry in manifest.datasets),
-            manifest_encoding_labels=tuple(entry.label for entry in manifest.encodings),
+        if not dry_run and _apply_no_category_alias_skips(
+            sheets=sheets,
+            snapshot=snapshot,
+            manifest=manifest,
+            owner=owner,
+        ):
+            continue
+
+        claim_coord = _find_first_claimable_coord(
+            snapshot=snapshot,
+            manifest=manifest,
             now=datetime.now(timezone.utc),
         )
         if claim_coord is None:
@@ -127,6 +137,8 @@ def run_once(
                 best_params_file=Path(best_params_file).resolve() if best_params_file is not None else None,
                 skip_tuning=skip_tuning,
                 device=device,
+                poster_fast=poster_fast,
+                max_rows=max_rows,
             )
         )
 
@@ -223,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--best-params-file")
     parser.add_argument("--skip-tuning", action="store_true")
     parser.add_argument("--continue-on-failure", action="store_true")
+    parser.add_argument("--poster-fast", action="store_true")
+    parser.add_argument("--max-rows", type=int)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -241,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         skip_tuning=args.skip_tuning,
         device=args.device,
         continue_on_failure=args.continue_on_failure,
+        poster_fast=args.poster_fast,
+        max_rows=args.max_rows,
     )
     return result.exit_code
 
@@ -511,6 +527,8 @@ def _build_runner_argv(
     best_params_file: Path | None,
     skip_tuning: bool,
     device: str,
+    poster_fast: bool,
+    max_rows: int | None,
 ) -> list[str]:
     argv = [
         sys.executable,
@@ -532,8 +550,124 @@ def _build_runner_argv(
         argv.extend(["--best-params-file", str(best_params_file)])
     if skip_tuning:
         argv.append("--skip-tuning")
+    if poster_fast:
+        argv.append("--poster-fast")
+    if max_rows is not None:
+        argv.extend(["--max-rows", str(int(max_rows))])
     argv.extend(["--device", device])
     return argv
+
+
+@lru_cache(maxsize=None)
+def _dataset_has_categorical_features(dataset: DatasetEntry) -> bool:
+    try:
+        df = pd.read_csv(dataset.csv_path)
+    except OSError:
+        return True
+    schema = TabularSchema.infer_from_dataframe(
+        df,
+        target_col=dataset.target_col,
+        id_col=dataset.id_col,
+    )
+    return bool(schema.categorical_cols)
+
+
+def _find_first_claimable_coord(
+    *,
+    snapshot: WorksheetSnapshot,
+    manifest: CtganManifest,
+    now: datetime,
+) -> str | None:
+    representative_coords: dict[str, str | None] = {}
+    for dataset_label in snapshot.dataset_headers:
+        dataset = manifest.resolve_dataset_label(dataset_label)
+        if _dataset_has_categorical_features(dataset):
+            representative_coords[dataset_label] = None
+            continue
+        representative_coords[dataset_label] = _representative_coord_for_dataset(
+            snapshot=snapshot,
+            dataset_label=dataset_label,
+        )
+
+    for encoding_offset, _encoding_label in enumerate(snapshot.encoding_headers, start=2):
+        for dataset_offset, dataset_label in enumerate(snapshot.dataset_headers, start=2):
+            coord = f"{_column_name(dataset_offset)}{encoding_offset}"
+            representative_coord = representative_coords.get(dataset_label)
+            if representative_coord is not None and coord != representative_coord:
+                continue
+            payload = parse_cell_payload(snapshot.cell_values.get(coord))
+            if payload.is_claimable(now=now):
+                return coord
+    return None
+
+
+def _representative_coord_for_dataset(
+    *,
+    snapshot: WorksheetSnapshot,
+    dataset_label: str,
+) -> str | None:
+    dataset_index = snapshot.dataset_headers.index(dataset_label) + 2
+    for encoding_offset, _encoding_label in enumerate(snapshot.encoding_headers, start=2):
+        coord = f"{_column_name(dataset_index)}{encoding_offset}"
+        payload = parse_cell_payload(snapshot.cell_values.get(coord))
+        if payload.status in {"failed", "skipped"}:
+            continue
+        return coord
+    return None
+
+
+def _apply_no_category_alias_skips(
+    *,
+    sheets: SheetsClientProtocol,
+    snapshot: WorksheetSnapshot,
+    manifest: CtganManifest,
+    owner: str,
+) -> bool:
+    modified = False
+    for dataset_label in snapshot.dataset_headers:
+        dataset = manifest.resolve_dataset_label(dataset_label)
+        if _dataset_has_categorical_features(dataset):
+            continue
+
+        representative_coord = _representative_coord_for_dataset(
+            snapshot=snapshot,
+            dataset_label=dataset_label,
+        )
+        if representative_coord is None:
+            continue
+
+        representative_payload = parse_cell_payload(snapshot.cell_values.get(representative_coord))
+        if representative_payload.status != "done":
+            continue
+
+        dataset_index = snapshot.dataset_headers.index(dataset_label) + 2
+        representative_row = _row_number(representative_coord)
+        for encoding_offset, _encoding_label in enumerate(snapshot.encoding_headers, start=2):
+            coord = f"{_column_name(dataset_index)}{encoding_offset}"
+            if coord == representative_coord or encoding_offset <= representative_row:
+                continue
+
+            payload = parse_cell_payload(snapshot.cell_values.get(coord))
+            if payload.status != "not-started":
+                continue
+
+            now = _utcnow()
+            sheets.write_cell(
+                coord,
+                _build_payload(
+                    status="skipped",
+                    run_id=representative_payload.run_id,
+                    owner=representative_payload.owner or owner,
+                    started_at=representative_payload.started_at or now,
+                    heartbeat_at=now,
+                    finished_at=now,
+                    stage="skipped",
+                    note=f"aliased to {representative_coord}: no categorical features",
+                ),
+            )
+            modified = True
+
+    return modified
 
 
 def _build_payload(
@@ -590,6 +724,13 @@ def _column_name(index: int) -> str:
         current, remainder = divmod(current - 1, 26)
         name = chr(65 + remainder) + name
     return name
+
+
+def _row_number(coord: str) -> int:
+    digits = "".join(char for char in coord if char.isdigit())
+    if not digits:
+        raise ValueError(f"cell coordinate must contain a row number: {coord!r}")
+    return int(digits)
 
 
 def _infer_project_root(manifest_path: Path) -> Path:

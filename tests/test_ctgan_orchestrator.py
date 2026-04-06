@@ -341,11 +341,16 @@ def test_build_runner_argv_passes_common_best_params_file_skip_tuning_and_device
         best_params_file=best_params_file,
         skip_tuning=True,
         device="cuda",
+        poster_fast=True,
+        max_rows=5000,
     )
 
     assert "--best-params-file" in argv
     assert str(best_params_file.resolve()) in argv
     assert "--skip-tuning" in argv
+    assert "--poster-fast" in argv
+    assert "--max-rows" in argv
+    assert "5000" in argv
     assert argv[-2:] == ["--device", "cuda"]
 
 
@@ -383,6 +388,9 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
             str(best_params_file),
             "--skip-tuning",
             "--continue-on-failure",
+            "--poster-fast",
+            "--max-rows",
+            "5000",
             "--device",
             "cuda",
         ]
@@ -392,7 +400,167 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
     assert captured["best_params_file"] == best_params_file.resolve()
     assert captured["skip_tuning"] is True
     assert captured["continue_on_failure"] is True
+    assert captured["poster_fast"] is True
+    assert captured["max_rows"] == 5000
     assert captured["device"] == "cuda"
+
+
+def test_orchestrator_skips_redundant_methods_after_first_done_for_no_category_dataset(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "label": "numeric-only",
+                        "dataset_id": "openml_numeric_only",
+                        "target_col": "target",
+                        "id_col": None,
+                    }
+                ],
+                "encodings": [
+                    {"label": "m1", "encoding_id": "m1"},
+                    {"label": "m2", "encoding_id": "m2"},
+                    {"label": "m3", "encoding_id": "m3"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sheets = FakeSheetsClient(
+        matrix={
+            "dataset_headers": ["numeric-only"],
+            "encoding_headers": ["m1", "m2", "m3"],
+            "cell_values": {
+                "B2": _payload(
+                    "done",
+                    run_id="r1",
+                    owner="host:1:0",
+                    stage="done",
+                    started_at="2026-04-02T00:00:00Z",
+                    heartbeat_at="2026-04-02T00:10:00Z",
+                    finished_at="2026-04-02T00:11:00Z",
+                ),
+                "B3": " ",
+                "B4": " ",
+            },
+        }
+    )
+    monkeypatch.setattr(orchestrator_mod, "_dataset_has_categorical_features", lambda dataset: False, raising=False)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+    )
+
+    assert out.exit_code == 0
+    skipped = [payload for payload in fake_sheets.write_calls if payload.status == "skipped"]
+    assert len(skipped) == 2
+    assert all("aliased to B2" in payload.note for payload in skipped)
+
+
+def test_orchestrator_uses_next_method_when_first_no_category_candidate_failed(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "label": "numeric-only",
+                        "dataset_id": "openml_numeric_only",
+                        "target_col": "target",
+                        "id_col": None,
+                    }
+                ],
+                "encodings": [
+                    {"label": "m1", "encoding_id": "m1"},
+                    {"label": "m2", "encoding_id": "m2"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sheets = FakeSheetsClient(
+        matrix={
+            "dataset_headers": ["numeric-only"],
+            "encoding_headers": ["m1", "m2"],
+            "cell_values": {
+                "B2": _payload(
+                    "failed",
+                    run_id="r1",
+                    owner="host:1:0",
+                    stage="failed",
+                    started_at="2026-04-02T00:00:00Z",
+                    heartbeat_at="2026-04-02T00:10:00Z",
+                    finished_at="2026-04-02T00:11:00Z",
+                ),
+                "B3": " ",
+            },
+        }
+    )
+    monkeypatch.setattr(orchestrator_mod, "_dataset_has_categorical_features", lambda dataset: False, raising=False)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=True,
+    )
+
+    assert out.claimed_coord == "B3"
+
+
+def test_orchestrator_does_not_run_later_method_while_no_category_candidate_is_in_progress(monkeypatch, tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "label": "numeric-only",
+                        "dataset_id": "openml_numeric_only",
+                        "target_col": "target",
+                        "id_col": None,
+                    }
+                ],
+                "encodings": [
+                    {"label": "m1", "encoding_id": "m1"},
+                    {"label": "m2", "encoding_id": "m2"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sheets = FakeSheetsClient(
+        matrix={
+            "dataset_headers": ["numeric-only"],
+            "encoding_headers": ["m1", "m2"],
+            "cell_values": {
+                "B2": _payload(
+                    "in-progress",
+                    run_id="r1",
+                    owner="host:1:0",
+                    stage="crossval",
+                    started_at="2026-04-02T00:00:00Z",
+                    heartbeat_at="2099-01-01T00:00:00Z",
+                ),
+                "B3": " ",
+            },
+        }
+    )
+    monkeypatch.setattr(orchestrator_mod, "_dataset_has_categorical_features", lambda dataset: False, raising=False)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=True,
+    )
+
+    assert out.exit_code == 0
+    assert out.claimed_coord is None
 
 
 def test_orchestrator_continue_on_failure_claims_next_job_and_keeps_going(monkeypatch, tmp_path):
