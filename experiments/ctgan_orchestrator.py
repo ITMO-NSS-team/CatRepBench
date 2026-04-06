@@ -758,8 +758,11 @@ def _read_available_line(stream: TextIO | None, *, timeout_seconds: float) -> st
         return None
 
     line_queue = _stream_line_queue(stream)
+    timeout = max(timeout_seconds, 0.0)
+    if timeout == 0.0 and line_queue.empty():
+        timeout = 0.05
     try:
-        line = line_queue.get(timeout=max(timeout_seconds, 0.0))
+        line = line_queue.get(timeout=timeout)
     except queue.Empty:
         return None
 

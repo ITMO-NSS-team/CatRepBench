@@ -14,6 +14,7 @@ from genbench.evaluation.metrics import (
 from genbench.evaluation.pipeline.single_run import DistributionEvaluationPipeline
 from genbench.evaluation.tstr import tstr_catboost
 from genbench.evaluation.utility.tstr_catboost import TSTRCatBoostEvaluator
+import genbench.evaluation.utility.tstr_catboost as tstr_mod
 
 
 @pytest.fixture
@@ -117,6 +118,55 @@ def test_tstr_catboost_uses_weighted_f1_for_classification():
         assert key in scores
     assert scores["task_type"] == "classification"
     assert "r2_real" not in scores
+
+
+def test_tstr_catboost_flattens_2d_classifier_predictions(monkeypatch):
+    class FakePool:
+        def __init__(self, data, label, cat_features=None):
+            self.data = data
+            self.label = label
+            self.cat_features = cat_features
+
+    class FakeCatBoostClassifier:
+        def __init__(self, random_seed, verbose):
+            self.random_seed = random_seed
+            self.verbose = verbose
+
+        def fit(self, pool):
+            return self
+
+        def predict(self, pool):
+            return np.asarray([[0], [1]], dtype=int)
+
+    monkeypatch.setattr(tstr_mod, "Pool", FakePool)
+    monkeypatch.setattr(tstr_mod, "CatBoostClassifier", FakeCatBoostClassifier)
+
+    df = pd.DataFrame(
+        {
+            "x": [0, 1, 0, 1],
+            "cat": ["a", "a", "b", "b"],
+            "target": [0, 1, 0, 1],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=[],
+        discrete_cols=["x"],
+        categorical_cols=["cat"],
+        target_col="target",
+    )
+
+    scores = tstr_catboost(
+        train_real=df.iloc[:2].copy(),
+        test_real=df.iloc[2:].copy(),
+        synth_train=df.iloc[:2].copy(),
+        schema=schema,
+        random_seed=0,
+        task_type="classification",
+    )
+
+    assert scores["task_type"] == "classification"
+    assert "f1_weighted_real" in scores
+    assert "f1_weighted_synth" in scores
 
 
 def test_tstr_evaluator_class(sample_data):

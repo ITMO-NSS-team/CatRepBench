@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, r2_score
 from catboost import CatBoostClassifier, CatBoostRegressor, Pool
@@ -10,6 +11,15 @@ from catboost import CatBoostClassifier, CatBoostRegressor, Pool
 from genbench.data.schema import TabularSchema
 from genbench.evaluation.base import BaseEvaluator, EvaluationResult
 from genbench.transforms.target import infer_is_regression_target
+
+
+def _to_1d_prediction_series(preds: object, *, dtype: object | None = None) -> pd.Series:
+    arr = np.asarray(preds)
+    if arr.ndim == 2 and arr.shape[1] == 1:
+        arr = arr[:, 0]
+    elif arr.ndim != 1:
+        raise ValueError(f"Predictions must be 1-dimensional, got shape {arr.shape}.")
+    return pd.Series(arr).astype(dtype if dtype is not None else None)
 
 
 def _prepare_features(df: pd.DataFrame, schema: TabularSchema) -> pd.DataFrame:
@@ -108,7 +118,10 @@ def tstr_catboost(
         model = CatBoostClassifier(random_seed=random_seed, verbose=False)
         model.fit(train_pool)
         preds = model.predict(test_pool)
-        pred_series = pd.Series(preds).astype(test_real[target_col].dtype if hasattr(test_real[target_col], "dtype") else None)
+        pred_series = _to_1d_prediction_series(
+            preds,
+            dtype=test_real[target_col].dtype if hasattr(test_real[target_col], "dtype") else None,
+        )
         return {
             "f1_weighted": float(f1_score(test_real[target_col], pred_series, average="weighted")),
         }
