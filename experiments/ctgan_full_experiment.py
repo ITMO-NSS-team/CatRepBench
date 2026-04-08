@@ -520,6 +520,16 @@ def run_full_ctgan_experiment(
             "best_source": "provided_file",
         }
     else:
+        def emit_tuning_progress(message: str) -> None:
+            _emit_progress(
+                stage="tuning",
+                message=message,
+                progress_stream=progress_stream,
+                progress_format=progress_format,
+                dataset_id=dataset_id,
+                encoding_method=encoding_method,
+            )
+
         _emit_progress(
             stage="tuning",
             message="tuning ctgan",
@@ -536,6 +546,7 @@ def run_full_ctgan_experiment(
             task_type=_task_type_from_flag(is_regression),
             output_dir=tuning_output_dir,
             device=device,
+            progress_callback=emit_tuning_progress,
         )
 
     _emit_progress(

@@ -197,6 +197,21 @@ def fake_buffered_progress_process(*args, **kwargs):
     )
 
 
+def fake_repeated_tuning_progress_process(*args, **kwargs):
+    stdout = io.StringIO(
+        '{"event":"progress","stage":"tuning","message":"trial 1/30 | tuning eta calculating"}\n'
+        '{"event":"progress","stage":"tuning","message":"trial 1/30 | Gen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it] | tuning eta 1h 26m"}\n'
+    )
+    return SimpleNamespace(
+        stdout=stdout,
+        poll=lambda: 0,
+        wait=lambda timeout=None: 0,
+        terminate=lambda: None,
+        kill=lambda: None,
+        returncode=0,
+    )
+
+
 def test_dry_run_reports_candidate_without_writing(monkeypatch, tmp_path):
     manifest_path = write_orchestrator_manifest(tmp_path)
     fake_sheets = FakeSheetsClient.single_not_started_cell()
@@ -268,6 +283,29 @@ def test_orchestrator_does_not_miss_buffered_progress_lines(monkeypatch, tmp_pat
     assert out.exit_code == 0
     assert any(
         payload.status == "in-progress" and payload.stage == "crossval"
+        for payload in fake_sheets.write_calls
+    )
+
+
+def test_orchestrator_keeps_latest_tuning_progress_note(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    fake_sheets = FakeSheetsClient.single_not_started_cell()
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", fake_repeated_tuning_progress_process)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+    )
+
+    assert out.exit_code == 0
+    assert any(
+        payload.status == "in-progress"
+        and payload.stage == "tuning"
+        and "trial 1/30" in payload.note
+        and "15/300" in payload.note
+        and "tuning eta" in payload.note
         for payload in fake_sheets.write_calls
     )
 

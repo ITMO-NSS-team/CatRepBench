@@ -145,6 +145,13 @@ def fake_select_ctgan_best_params(*, output_dir, **kwargs):
     }
 
 
+def fake_select_ctgan_best_params_with_progress(*, output_dir, progress_callback, **kwargs):
+    progress_callback(
+        "trial 1/30 | Gen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it] | tuning eta 1h 26m"
+    )
+    return fake_select_ctgan_best_params(output_dir=output_dir, **kwargs)
+
+
 def make_task_type_capturing_select(captured: dict[str, object]):
     def _fake_select(*, output_dir, **kwargs):
         captured["task_type"] = kwargs.get("task_type")
@@ -297,6 +304,43 @@ def test_run_full_experiment_uses_weighted_f1_for_classification(tmp_path, monke
     assert payload["tstr"]["task_type"] == "classification"
     assert "f1_weighted_real" in payload["tstr"]["metrics"]
     assert "f1_weighted_synth" in payload["tstr"]["metrics"]
+    assert first_occurrence_order(progress_stages(progress_stream)) == [
+        "launching",
+        "tuning",
+        "crossval",
+        "metrics",
+        "saving",
+    ]
+
+
+def test_run_full_experiment_forwards_tuning_progress_messages(tmp_path, monkeypatch):
+    manifest_path = write_runner_manifest(tmp_path)
+    write_runner_csv(tmp_path)
+    monkeypatch.setattr(full_mod, "CtganGenerative", DummyCtganGenerative)
+    monkeypatch.setattr(full_mod, "select_ctgan_best_params", fake_select_ctgan_best_params_with_progress)
+    monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+    progress_stream = StringIO()
+
+    full_mod.run_full_ctgan_experiment(
+        manifest_path=manifest_path,
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        output_root=tmp_path / "results",
+        progress_stream=progress_stream,
+        device="cpu",
+    )
+
+    tuning_messages = [
+        json.loads(line)["message"]
+        for line in progress_stream.getvalue().splitlines()
+        if line.strip() and json.loads(line)["stage"] == "tuning"
+    ]
+
+    assert "tuning ctgan" in tuning_messages
+    assert any("trial 1/30" in message for message in tuning_messages)
+    assert any("15/300" in message for message in tuning_messages)
+    assert any("tuning eta" in message for message in tuning_messages)
     assert first_occurrence_order(progress_stages(progress_stream)) == [
         "launching",
         "tuning",

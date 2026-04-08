@@ -35,12 +35,14 @@ Outputs:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence, TextIO
 
 import numpy as np
 import optuna
@@ -78,6 +80,20 @@ class CtganTuningResult:
     model_artifacts_dir: Optional[Path] = None
 
 
+@dataclass(frozen=True)
+class CtganFitProgress:
+    current_step: int
+    total_steps: int
+    fraction: float
+    display_text: str
+
+
+_CTGAN_FIT_PROGRESS_RE = re.compile(
+    r"^(?P<display>Gen\.\s*\([^)]*\)\s*\|\s*Discrim\.\s*\([^)]*\):.*?\|\s*(?P<current>\d+)\s*/\s*(?P<total>\d+)\s*\[[^\]]+\])$"
+)
+_PROGRESS_EMIT_INTERVAL_SECONDS = 10.0
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name).strip()).strip("_") or "unknown"
 
@@ -104,6 +120,184 @@ def _jsonify(value: Any) -> Any:
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(_jsonify(payload), f, ensure_ascii=False, indent=2)
+
+
+def _parse_ctgan_fit_progress_line(raw_line: str) -> CtganFitProgress | None:
+    line = raw_line.strip()
+    if not line:
+        return None
+    match = _CTGAN_FIT_PROGRESS_RE.match(line)
+    if match is None:
+        return None
+    current_step = int(match.group("current"))
+    total_steps = int(match.group("total"))
+    if total_steps <= 0:
+        return None
+    fraction = min(max(float(current_step) / float(total_steps), 0.0), 1.0)
+    return CtganFitProgress(
+        current_step=current_step,
+        total_steps=total_steps,
+        fraction=fraction,
+        display_text=match.group("display"),
+    )
+
+
+def _format_eta_seconds(seconds: float | None) -> str:
+    if seconds is None:
+        return "calculating"
+    total_seconds = max(int(round(seconds)), 0)
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    total_minutes, seconds_part = divmod(total_seconds, 60)
+    if total_minutes < 60:
+        return f"{total_minutes}m {seconds_part:02d}s"
+    total_hours, minutes_part = divmod(total_minutes, 60)
+    if total_hours < 24:
+        return f"{total_hours}h {minutes_part:02d}m"
+    total_days, hours_part = divmod(total_hours, 24)
+    return f"{total_days}d {hours_part}h"
+
+
+def _estimate_tuning_eta_seconds(
+    *,
+    elapsed_seconds: float,
+    total_trials: int,
+    completed_trials: int,
+    current_trial_fraction: float,
+) -> float | None:
+    if total_trials <= 0:
+        return None
+    completed_units = float(completed_trials) + min(max(float(current_trial_fraction), 0.0), 1.0)
+    if completed_units <= 0.0:
+        return None
+    remaining_units = max(float(total_trials) - completed_units, 0.0)
+    return (float(elapsed_seconds) / completed_units) * remaining_units
+
+
+def _format_tuning_progress_message(
+    *,
+    current_trial: int,
+    total_trials: int,
+    fit_progress: CtganFitProgress | None,
+    eta_seconds: float | None,
+) -> str:
+    message = f"trial {current_trial}/{total_trials}"
+    if fit_progress is not None:
+        message = f"{message} | {fit_progress.display_text}"
+    message = f"{message} | tuning eta {_format_eta_seconds(eta_seconds)}"
+    return message
+
+
+class _FitOutputCapture:
+    def __init__(self, on_line: Callable[[str], None], *, passthrough: TextIO) -> None:
+        self._on_line = on_line
+        self._passthrough = passthrough
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        if not text:
+            return 0
+        self._passthrough.write(text)
+        self._buffer += text
+        self._drain_buffer()
+        return len(text)
+
+    def flush(self) -> None:
+        self._passthrough.flush()
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._on_line(self._buffer)
+            self._buffer = ""
+
+    def _drain_buffer(self) -> None:
+        start = 0
+        for index, char in enumerate(self._buffer):
+            if char not in {"\r", "\n"}:
+                continue
+            chunk = self._buffer[start:index]
+            if chunk:
+                self._on_line(chunk)
+            start = index + 1
+        if start:
+            self._buffer = self._buffer[start:]
+
+
+def _fit_model_with_progress_capture(
+    *,
+    model: CtganGenerative,
+    train_df: pd.DataFrame,
+    transformed_schema: TabularSchema,
+    total_trials: int,
+    current_trial: int,
+    completed_trials: int,
+    tuning_started_at: float,
+    progress_callback: Callable[[str], None] | None,
+) -> None:
+    if progress_callback is None:
+        model.fit(train_df, transformed_schema)
+        return
+
+    last_emitted_at: float | None = None
+    last_message: str | None = None
+    fit_progress_emitted = False
+
+    def maybe_emit(message: str, *, force: bool = False, fit_progress: bool = False) -> None:
+        nonlocal fit_progress_emitted, last_emitted_at, last_message
+
+        now = time.monotonic()
+        if not force and message == last_message:
+            return
+        if (
+            not force
+            and last_emitted_at is not None
+            and (now - last_emitted_at) < _PROGRESS_EMIT_INTERVAL_SECONDS
+            and not (fit_progress and not fit_progress_emitted)
+        ):
+            return
+        progress_callback(message)
+        last_emitted_at = now
+        last_message = message
+        if fit_progress:
+            fit_progress_emitted = True
+
+    maybe_emit(
+        _format_tuning_progress_message(
+            current_trial=current_trial,
+            total_trials=total_trials,
+            fit_progress=None,
+            eta_seconds=None,
+        ),
+        force=True,
+    )
+
+    def on_line(raw_line: str) -> None:
+        progress = _parse_ctgan_fit_progress_line(raw_line)
+        if progress is None:
+            return
+        message = _format_tuning_progress_message(
+            current_trial=current_trial,
+            total_trials=total_trials,
+            fit_progress=progress,
+            eta_seconds=_estimate_tuning_eta_seconds(
+                elapsed_seconds=time.monotonic() - tuning_started_at,
+                total_trials=total_trials,
+                completed_trials=completed_trials,
+                current_trial_fraction=progress.fraction,
+            ),
+        )
+        maybe_emit(message, fit_progress=True)
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    capture_stdout = _FitOutputCapture(on_line, passthrough=original_stdout)
+    capture_stderr = _FitOutputCapture(on_line, passthrough=original_stderr)
+    try:
+        with contextlib.redirect_stdout(capture_stdout), contextlib.redirect_stderr(capture_stderr):
+            model.fit(train_df, transformed_schema)
+    finally:
+        capture_stdout.finish()
+        capture_stderr.finish()
 
 
 def _suggest_ctgan_params(
@@ -241,6 +435,7 @@ def tune_ctgan(
     save_model: bool = False,
     timeout_seconds: Optional[int] = None,
     device: str = "cuda",
+    progress_callback: Callable[[str], None] | None = None,
 ) -> CtganTuningResult:
     """
     Finetune CTGAN with Optuna using only project wrappers/classes/metrics.
@@ -290,11 +485,28 @@ def tune_ctgan(
         load_if_exists=True,
     )
 
+    started_at = time.monotonic()
+    started_trials = 0
+    completed_trials = 0
+
     def objective(trial: optuna.Trial) -> float:
+        nonlocal started_trials, completed_trials
+
+        started_trials += 1
+        current_trial = started_trials
         params = _suggest_ctgan_params(trial, epochs=epochs, device=device)
         model = CtganGenerative(discrete_cols=used_discrete_cols, ctgan_kwargs=params)
         try:
-            model.fit(train_df, transformed_schema)
+            _fit_model_with_progress_capture(
+                model=model,
+                train_df=train_df,
+                transformed_schema=transformed_schema,
+                total_trials=int(n_trials),
+                current_trial=current_trial,
+                completed_trials=completed_trials,
+                tuning_started_at=started_at,
+                progress_callback=progress_callback,
+            )
             synth_df = model.sample(len(val_df))
             score, details = _score_synthetic(
                 val_df=val_df,
@@ -311,8 +523,9 @@ def tune_ctgan(
             raise
         except Exception as exc:
             raise optuna.TrialPruned(f"Trial failed: {exc}") from exc
+        finally:
+            completed_trials += 1
 
-    started_at = time.time()
     study.optimize(
         objective,
         n_trials=n_trials,
@@ -320,7 +533,7 @@ def tune_ctgan(
         n_jobs=1,
         show_progress_bar=False,
     )
-    duration_seconds = time.time() - started_at
+    duration_seconds = time.monotonic() - started_at
 
     if study.best_trial is None:
         raise RuntimeError("No successful Optuna trials.")

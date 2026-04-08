@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
@@ -14,6 +15,7 @@ from genbench.data.schema import TabularSchema
 
 class DummyCtganGenerative:
     created: list["DummyCtganGenerative"] = []
+    fit_output_writes: list[str] = []
 
     def __init__(self, discrete_cols=None, ctgan_kwargs=None):
         self.discrete_cols = list(discrete_cols or [])
@@ -27,6 +29,9 @@ class DummyCtganGenerative:
     def fit(self, df: pd.DataFrame, schema: TabularSchema) -> "DummyCtganGenerative":
         self.train_df = df.reset_index(drop=True).copy()
         self.fit_schema = schema
+        for chunk in self.fit_output_writes:
+            sys.stderr.write(chunk)
+            sys.stderr.flush()
         self.fitted_ = True
         return self
 
@@ -370,3 +375,67 @@ def test_tune_ctgan_label_encodes_categorical_target_for_classification(tmp_path
     fitted_train = DummyCtganGenerative.created[0].train_df
     assert fitted_train is not None
     assert pd.api.types.is_integer_dtype(fitted_train["target"])
+
+
+def test_parse_ctgan_fit_progress_line_extracts_trial_fraction():
+    line = "Gen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it]"
+
+    progress = tune_mod._parse_ctgan_fit_progress_line(line)
+
+    assert progress is not None
+    assert progress.current_step == 15
+    assert progress.total_steps == 300
+    assert progress.fraction == pytest.approx(0.05)
+    assert progress.display_text == line
+    assert tune_mod._parse_ctgan_fit_progress_line("ordinary log line") is None
+
+
+def test_tune_ctgan_progress_callback_emits_trial_progress_and_eta(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = [
+        "\rGen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it]"
+    ]
+    progress_messages: list[str] = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=progress_messages.append,
+    )
+
+    assert any("trial 1/1" in message for message in progress_messages)
+    assert any("15/300" in message for message in progress_messages)
+    assert any("tuning eta" in message for message in progress_messages)
+
+
+def test_tune_ctgan_progress_callback_preserves_non_progress_fit_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = [
+        "warning: fit emitted diagnostics\n",
+        "\rGen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it]",
+    ]
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=lambda message: None,
+    )
+
+    captured = capsys.readouterr()
+    assert "warning: fit emitted diagnostics" in captured.err
