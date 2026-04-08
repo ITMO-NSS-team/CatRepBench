@@ -10,16 +10,16 @@ from typing import Any, TextIO
 import pandas as pd
 
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from experiments.ctgan_common import (
+from experiments.ctgan.ctgan_common import (
     DEFAULT_CTGAN_EPOCHS,
     build_ctgan_kwargs,
     build_preprocess_pipeline,
     default_discrete_cols,
 )
-from experiments.ctgan_manifest import load_ctgan_manifest
-from experiments.ctgan_tuning import select_ctgan_best_params
+from experiments.ctgan.orchestrator_staff.ctgan_manifest import load_ctgan_manifest
+from experiments.ctgan.ctgan_tuning import select_ctgan_best_params
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigHoldout, SplitConfigKFold
@@ -70,12 +70,9 @@ def _resolve_manifest_encoding(manifest: Any, *, encoding_method: str) -> Any:
 
 
 def _infer_project_root(manifest_path: Path) -> Path:
-    candidates = [manifest_path.parent, manifest_path.parent.parent]
-    for candidate in candidates:
+    for candidate in manifest_path.parents:
         if (candidate / "datasets" / "raw").exists() or (candidate / "genbench").exists():
             return candidate
-    if manifest_path.parent.name == "experiments":
-        return manifest_path.parent.parent
     return manifest_path.parent
 
 

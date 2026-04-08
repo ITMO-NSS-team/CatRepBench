@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import experiments.ctgan_orchestrator_tmux as tmux_mod
+import experiments.ctgan.orchestrator_staff.ctgan_orchestrator_tmux as tmux_mod
 
 
 def test_default_session_name_uses_hostname_and_index(monkeypatch):
@@ -34,7 +34,7 @@ def test_log_and_metadata_paths_live_under_orchestrator_logs(tmp_path):
 
 def test_build_worker_argv_preserves_orchestrator_contract():
     argv = tmux_mod.build_worker_argv(
-        manifest_path=Path("/repo/experiments/ctgan_orchestrator_manifest.json"),
+        manifest_path=Path("/repo/experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json"),
         worksheet="CTGAN",
         output_root=Path("/repo/experiments/results"),
         heartbeat_seconds=90,
@@ -42,9 +42,9 @@ def test_build_worker_argv_preserves_orchestrator_contract():
 
     assert argv == [
         tmux_mod.sys.executable,
-        "experiments/ctgan_orchestrator.py",
+        "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py",
         "--manifest",
-        "/repo/experiments/ctgan_orchestrator_manifest.json",
+        "/repo/experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json",
         "--worksheet",
         "CTGAN",
         "--output-root",
@@ -57,14 +57,14 @@ def test_build_worker_argv_preserves_orchestrator_contract():
 def test_build_tmux_launch_command_wraps_worker_with_tee(tmp_path):
     command = tmux_mod.build_tmux_launch_command(
         session_name="ctgan-orch-node-a-02",
-        worker_argv=["python", "experiments/ctgan_orchestrator.py", "--worksheet", "CTGAN"],
+        worker_argv=["python", "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py", "--worksheet", "CTGAN"],
         log_path=tmp_path / "results" / "orchestrator_logs" / "ctgan-orch-node-a-02.log",
         cwd=tmp_path,
     )
 
     assert command[:5] == ["tmux", "new-session", "-d", "-s", "ctgan-orch-node-a-02"]
     assert "tee -a" in command[-1]
-    assert "experiments/ctgan_orchestrator.py" in command[-1]
+    assert "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py" in command[-1]
 
 
 def test_launch_fails_when_tmux_is_missing(monkeypatch, tmp_path):
@@ -126,6 +126,18 @@ def test_attach_command_invokes_tmux_attach(monkeypatch):
     assert calls == [["tmux", "attach", "-t", "ctgan-orch-node-a-01"]]
 
 
+def test_infer_project_root_finds_repo_root_for_nested_manifest_path(tmp_path):
+    project_root = tmp_path / "repo"
+    manifest_path = project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    (project_root / "genbench").mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    resolved = tmux_mod._infer_project_root(manifest_path)
+
+    assert resolved == project_root
+
+
 def test_list_sessions_reads_tmux_ls_and_filters_ctgan_prefix(monkeypatch, tmp_path):
     monkeypatch.setattr(tmux_mod.shutil, "which", lambda name: "/usr/bin/tmux")
     metadata_path = tmux_mod.metadata_path_for_session(
@@ -139,14 +151,14 @@ def test_list_sessions_reads_tmux_ls_and_filters_ctgan_prefix(monkeypatch, tmp_p
                 "session": "ctgan-orch-node-a-01",
                 "hostname": "node-a",
                 "started_at": "2026-04-02T03:00:00Z",
-                "argv": ["python", "experiments/ctgan_orchestrator.py"],
+                "argv": ["python", "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py"],
                 "log_path": str(
                     tmux_mod.log_path_for_session(
                         output_root=tmp_path / "results",
                         session_name="ctgan-orch-node-a-01",
                     )
                 ),
-                "manifest": "/repo/experiments/ctgan_orchestrator_manifest.json",
+                "manifest": "/repo/experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json",
                 "worksheet": "CTGAN",
             }
         ),
@@ -203,7 +215,7 @@ def test_tail_uses_metadata_to_find_log_file(tmp_path):
 def test_tmux_launcher_help_runs_as_script():
     project_root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
-        [sys.executable, "experiments/ctgan_orchestrator_tmux.py", "--help"],
+        [sys.executable, "experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py", "--help"],
         cwd=project_root,
         capture_output=True,
         text=True,

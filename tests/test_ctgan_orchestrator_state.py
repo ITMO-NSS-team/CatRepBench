@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from experiments.ctgan_orchestrator_state import (
+from experiments.ctgan.orchestrator_staff.ctgan_orchestrator_state import (
     find_first_claimable_cell,
     parse_cell_payload,
     validate_worksheet_headers,

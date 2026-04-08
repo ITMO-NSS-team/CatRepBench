@@ -20,10 +20,10 @@ The orchestrator runs the full pipeline for that cell:
 
 The main entrypoints are:
 
-- `experiments/ctgan_orchestrator.py`
-- `experiments/ctgan_orchestrator_tmux.py`
-- `experiments/ctgan_full_experiment.py`
-- `experiments/ctgan_orchestrator_manifest.json`
+- `experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py`
+- `experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py`
+- `experiments/ctgan/ctgan_full_experiment.py`
+- `experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json`
 
 ## One-Time Setup
 
@@ -99,8 +99,8 @@ The worksheet must be a matrix:
 
 Important rules:
 
-- dataset labels must match `label` values in `experiments/ctgan_orchestrator_manifest.json`
-- encoding labels must match `label` values in `experiments/ctgan_orchestrator_manifest.json`
+- dataset labels must match `label` values in `experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json`
+- encoding labels must match `label` values in `experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json`
 - matching is case-sensitive after trimming whitespace
 
 ### Empty Cells Are Correct
@@ -125,21 +125,109 @@ This avoids inconsistent results across workers.
 Always test the setup before a real launch:
 
 ```bash
-python experiments/ctgan_orchestrator.py \
-  --manifest experiments/ctgan_orchestrator_manifest.json \
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
   --worksheet CTGAN \
   --dry-run
 ```
 
 This prints the first claimable cell and the runner command it would start.
 
+## Current Launch Recipe
+
+The commands below assume:
+
+- you are already inside the repository root
+- `.venv` is already activated
+- the datasets are already downloaded
+
+### Current worker launch
+
+This is the current recommended launch for the poster batch:
+
+```bash
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export TORCH_NUM_INTEROP_THREADS=1
+export CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH="$HOME/.config/catrepbench/gsheets-service-account.json"
+export CATREPBENCH_GSHEETS_SPREADSHEET_ID="1Yr95EOm5hMi8jLVFsd_PQGjgJtVcJHKHUSBZboHjdbQ"
+export CATREPBENCH_GSHEETS_WORKSHEET="CTGAN"
+mkdir -p experiments/results/orchestrator_logs
+nohup .venv/bin/python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
+  --worksheet CTGAN \
+  --continue-on-failure \
+  --poster-fast \
+  --max-rows 10000 \
+  --best-params-file "$(pwd)/best_params.json" \
+  --skip-tuning \
+  --device cuda \
+  > experiments/results/orchestrator_logs/orchestrator-poster-fast.log 2>&1 < /dev/null &
+echo "PID=$!"
+```
+
+### Current log tail
+
+```bash
+tail -f experiments/results/orchestrator_logs/orchestrator-poster-fast.log
+```
+
+### Current restart block
+
+Use this after a fresh `git pull` or after changing the runtime environment:
+
+```bash
+pkill -f 'experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py' || true
+pkill -f 'experiments/ctgan/ctgan_full_experiment.py' || true
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+export TORCH_NUM_INTEROP_THREADS=1
+export CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH="$HOME/.config/catrepbench/gsheets-service-account.json"
+export CATREPBENCH_GSHEETS_SPREADSHEET_ID="1Yr95EOm5hMi8jLVFsd_PQGjgJtVcJHKHUSBZboHjdbQ"
+export CATREPBENCH_GSHEETS_WORKSHEET="CTGAN"
+mkdir -p experiments/results/orchestrator_logs
+nohup .venv/bin/python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
+  --worksheet CTGAN \
+  --continue-on-failure \
+  --poster-fast \
+  --max-rows 10000 \
+  --best-params-file "$(pwd)/best_params.json" \
+  --skip-tuning \
+  --device cuda \
+  > experiments/results/orchestrator_logs/orchestrator-poster-fast.log 2>&1 < /dev/null &
+echo "PID=$!"
+tail -n 50 experiments/results/orchestrator_logs/orchestrator-poster-fast.log
+```
+
+### Kill only CTGAN jobs over SSH
+
+This is the safe command to stop only the CTGAN orchestrator and CTGAN worker processes:
+
+```bash
+pkill -f 'experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py' || true
+pkill -f 'experiments/ctgan/ctgan_full_experiment.py' || true
+```
+
+### Inspect current CTGAN jobs
+
+```bash
+ps -u "$USER" -o pid,ppid,cmd | grep -E 'ctgan/orchestrator_staff/ctgan_orchestrator.py|ctgan/ctgan_full_experiment.py' | grep -v grep
+```
+
 ## Normal Launch
 
 To run a worker in the current terminal:
 
 ```bash
-python experiments/ctgan_orchestrator.py \
-  --manifest experiments/ctgan_orchestrator_manifest.json \
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
   --worksheet CTGAN
 ```
 
@@ -158,8 +246,8 @@ If you want to reconnect later and watch live stdout and stderr, use the `tmux` 
 ### Start a worker in tmux
 
 ```bash
-python experiments/ctgan_orchestrator_tmux.py launch \
-  --manifest experiments/ctgan_orchestrator_manifest.json \
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py launch \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
   --worksheet CTGAN \
   --index 1
 ```
@@ -171,19 +259,19 @@ This creates a detached `tmux` session, starts the orchestrator inside it, and w
 ### List active orchestrator tmux sessions
 
 ```bash
-python experiments/ctgan_orchestrator_tmux.py list
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py list
 ```
 
 ### Attach to a running session
 
 ```bash
-python experiments/ctgan_orchestrator_tmux.py attach --session <session-name>
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py attach --session <session-name>
 ```
 
 ### Read the latest log lines without attaching
 
 ```bash
-python experiments/ctgan_orchestrator_tmux.py tail \
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py tail \
   --session <session-name> \
   --lines 100
 ```
@@ -282,4 +370,3 @@ If you want to make a failed or stale job available again:
 An empty cell becomes claimable again.
 
 Do not manually edit `run_id`, `owner`, or partial JSON fields.
-

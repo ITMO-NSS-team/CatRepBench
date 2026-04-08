@@ -48,7 +48,7 @@ import numpy as np
 import optuna
 import pandas as pd
 
-from experiments.ctgan_common import (
+from experiments.ctgan.ctgan_common import (
     DEFAULT_CTGAN_EPOCHS,
     build_ctgan_kwargs,
     build_preprocess_pipeline,

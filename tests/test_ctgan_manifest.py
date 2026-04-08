@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from experiments.ctgan_manifest import load_ctgan_manifest
+from experiments.ctgan.orchestrator_staff.ctgan_manifest import load_ctgan_manifest
 from genbench.transforms.categorical import list_registered_representations
 
 
@@ -234,7 +234,7 @@ def test_load_manifest_rejects_labels_that_only_differ_by_spaces(tmp_path: Path)
 def test_repository_manifest_covers_canonical_datasets_registered_encodings_and_runner_metadata():
     project_root = Path(__file__).resolve().parents[1]
     manifest = load_ctgan_manifest(
-        project_root / "experiments" / "ctgan_orchestrator_manifest.json",
+        project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json",
         project_root=project_root,
     )
 
@@ -274,7 +274,7 @@ def test_repository_manifest_covers_canonical_datasets_registered_encodings_and_
 def test_repository_manifest_matches_downloaded_dataset_headers_when_raw_csvs_are_present():
     project_root = Path(__file__).resolve().parents[1]
     manifest = load_ctgan_manifest(
-        project_root / "experiments" / "ctgan_orchestrator_manifest.json",
+        project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json",
         project_root=project_root,
     )
     missing_paths = [entry.csv_path for entry in manifest.datasets if not entry.csv_path.exists()]

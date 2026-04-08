@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 _SESSION_PREFIX = "ctgan-orch"
 _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
@@ -63,7 +63,7 @@ def build_worker_argv(
 ) -> list[str]:
     return [
         sys.executable,
-        "experiments/ctgan_orchestrator.py",
+        "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py",
         "--manifest",
         str(manifest_path),
         "--worksheet",
@@ -272,12 +272,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _infer_project_root(manifest_path: Path) -> Path:
-    candidates = [manifest_path.parent, manifest_path.parent.parent]
-    for candidate in candidates:
-        if (candidate / "experiments").exists() or (candidate / "genbench").exists():
+    for candidate in manifest_path.parents:
+        if (candidate / "datasets" / "raw").exists() or (candidate / "genbench").exists():
             return candidate
-    if manifest_path.parent.name == "experiments":
-        return manifest_path.parent.parent
     return manifest_path.parent
 
 

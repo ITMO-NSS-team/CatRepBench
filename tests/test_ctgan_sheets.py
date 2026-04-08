@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from experiments.ctgan_sheets import SheetsClient, SheetsConfig, retry_call
+from experiments.ctgan.orchestrator_staff.ctgan_sheets import SheetsClient, SheetsConfig, retry_call
 
 
 def test_sheets_config_requires_service_account_env(monkeypatch):

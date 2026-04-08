@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from experiments.ctgan_common import (
+from experiments.ctgan.ctgan_common import (
     build_ctgan_kwargs,
     build_preprocess_pipeline,
     default_discrete_cols,

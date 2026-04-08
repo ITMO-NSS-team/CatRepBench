@@ -19,15 +19,15 @@ from typing import Any, Protocol, TextIO
 import pandas as pd
 
 if __package__ in {None, ""}:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from experiments.ctgan_manifest import CtganManifest, DatasetEntry, EncodingEntry, load_ctgan_manifest
-from experiments.ctgan_orchestrator_state import (
+from experiments.ctgan.orchestrator_staff.ctgan_manifest import CtganManifest, DatasetEntry, EncodingEntry, load_ctgan_manifest
+from experiments.ctgan.orchestrator_staff.ctgan_orchestrator_state import (
     CellPayload,
     parse_cell_payload,
     validate_worksheet_headers,
 )
-from experiments.ctgan_sheets import SheetsClient, SheetsConfig
+from experiments.ctgan.orchestrator_staff.ctgan_sheets import SheetsClient, SheetsConfig
 from genbench.data.schema import TabularSchema
 
 _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
@@ -532,7 +532,7 @@ def _build_runner_argv(
 ) -> list[str]:
     argv = [
         sys.executable,
-        "experiments/ctgan_full_experiment.py",
+        "experiments/ctgan/ctgan_full_experiment.py",
         "--manifest",
         str(manifest_path),
         "--dataset-id",
@@ -734,12 +734,9 @@ def _row_number(coord: str) -> int:
 
 
 def _infer_project_root(manifest_path: Path) -> Path:
-    candidates = [manifest_path.parent, manifest_path.parent.parent]
-    for candidate in candidates:
+    for candidate in manifest_path.parents:
         if (candidate / "datasets" / "raw").exists() or (candidate / "genbench").exists():
             return candidate
-    if manifest_path.parent.name == "experiments":
-        return manifest_path.parent.parent
     return manifest_path.parent
 
 

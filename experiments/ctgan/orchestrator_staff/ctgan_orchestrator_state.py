@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
-from experiments.ctgan_manifest import load_ctgan_manifest
+from experiments.ctgan.orchestrator_staff.ctgan_manifest import load_ctgan_manifest
 
 _SCHEMA_VERSION = 1
 _STALE_TIMEOUT = timedelta(hours=4)
@@ -287,9 +287,9 @@ def _normalize_worksheet_axis(
 
 @lru_cache(maxsize=1)
 def _default_manifest_labels() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    project_root = Path(__file__).resolve().parents[1]
+    project_root = Path(__file__).resolve().parents[3]
     manifest = load_ctgan_manifest(
-        project_root / "experiments" / "ctgan_orchestrator_manifest.json",
+        project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json",
         project_root=project_root,
     )
     return tuple(entry.label for entry in manifest.datasets), tuple(entry.label for entry in manifest.encodings)

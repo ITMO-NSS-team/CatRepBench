@@ -6,7 +6,7 @@ import sys
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-import experiments.ctgan_orchestrator as orchestrator_mod
+import experiments.ctgan.orchestrator_staff.ctgan_orchestrator as orchestrator_mod
 
 
 def write_orchestrator_manifest(tmp_path):
@@ -709,10 +709,22 @@ def test_orchestrator_continue_on_failure_survives_launch_errors(monkeypatch, tm
     assert any(payload.status == "done" for payload in fake_sheets.write_calls)
 
 
+def test_infer_project_root_finds_repo_root_for_nested_manifest_path(tmp_path):
+    project_root = tmp_path / "repo"
+    manifest_path = project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    (project_root / "genbench").mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    resolved = orchestrator_mod._infer_project_root(manifest_path)
+
+    assert resolved == project_root
+
+
 def test_orchestrator_cli_help_runs_as_script():
     project_root = orchestrator_mod.Path(__file__).resolve().parents[1]
     completed = subprocess.run(
-        [sys.executable, "experiments/ctgan_orchestrator.py", "--help"],
+        [sys.executable, "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py", "--help"],
         cwd=project_root,
         capture_output=True,
         text=True,

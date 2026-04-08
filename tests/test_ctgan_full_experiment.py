@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-import experiments.ctgan_full_experiment as full_mod
+import experiments.ctgan.ctgan_full_experiment as full_mod
 
 
 def progress_stages(progress_stream: StringIO) -> list[str]:
@@ -429,6 +429,18 @@ def test_run_full_experiment_marks_original_corr_unsupported_for_non_invertible_
     assert fold_payload["distribution"]["corr_frobenius_original_status"] == "unsupported_not_invertible"
 
 
+def test_infer_project_root_finds_repo_root_for_nested_manifest_path(tmp_path):
+    project_root = tmp_path / "repo"
+    manifest_path = project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    (project_root / "genbench").mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    resolved = full_mod._infer_project_root(manifest_path)
+
+    assert resolved == project_root
+
+
 def test_run_full_experiment_uses_best_params_file_and_skips_tuning(tmp_path, monkeypatch):
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
@@ -629,7 +641,7 @@ def test_cli_passes_poster_fast_and_max_rows(monkeypatch, tmp_path):
 def test_full_experiment_cli_help_runs_as_script():
     project_root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
-        [sys.executable, "experiments/ctgan_full_experiment.py", "--help"],
+        [sys.executable, "experiments/ctgan/ctgan_full_experiment.py", "--help"],
         cwd=project_root,
         capture_output=True,
         text=True,

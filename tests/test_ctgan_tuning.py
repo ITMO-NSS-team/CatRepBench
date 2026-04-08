@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("optuna")
 
-from experiments import ctgan_tuning as tune_mod
+from experiments.ctgan import ctgan_tuning as tune_mod
 from genbench.data.schema import TabularSchema
 
 
