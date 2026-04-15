@@ -315,6 +315,7 @@ def _suggest_ctgan_params(
     *,
     epochs: int,
     device: str,
+    verbose: bool = False,
 ) -> Dict[str, Any]:
     embedding_dim = int(trial.suggest_categorical("embedding_dim", [128, 256]))
     gen_dim = int(trial.suggest_categorical("gen_dim", [256, 512]))
@@ -336,6 +337,7 @@ def _suggest_ctgan_params(
         },
         epochs=epochs,
         device=device,
+        verbose=verbose,
     )
 
 
@@ -504,7 +506,12 @@ def tune_ctgan(
 
         started_trials += 1
         current_trial = started_trials
-        params = _suggest_ctgan_params(trial, epochs=epochs, device=device)
+        params = _suggest_ctgan_params(
+            trial,
+            epochs=epochs,
+            device=device,
+            verbose=(progress_callback is not None),
+        )
         model = CtganGenerative(discrete_cols=used_discrete_cols, ctgan_kwargs=params)
         try:
             _fit_model_with_progress_capture(

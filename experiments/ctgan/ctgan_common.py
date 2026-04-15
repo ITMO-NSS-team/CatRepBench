@@ -78,6 +78,7 @@ def build_ctgan_kwargs(
     *,
     epochs: int,
     device: str,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     device = _validate_device(device)
     embedding_dim = int(best_params["embedding_dim"])
@@ -98,6 +99,6 @@ def build_ctgan_kwargs(
         "generator_lr": generator_lr,
         "discriminator_lr": generator_lr * lr_ratio,
         "pac": 1,
-        "verbose": False,
+        "verbose": bool(verbose),
         "cuda": device == "cuda",
     }

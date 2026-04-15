@@ -441,6 +441,28 @@ def test_tune_ctgan_progress_callback_emits_initial_fit_state_before_first_epoch
     assert any("tuning eta" in message for message in progress_messages)
 
 
+def test_tune_ctgan_enables_ctgan_verbose_when_progress_callback_is_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=lambda _message: None,
+    )
+
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["verbose"] is True
+
+
 def test_fit_progress_capture_estimates_eta_at_start_of_second_trial(monkeypatch):
     messages: list[str] = []
     model = DummyCtganGenerative(ctgan_kwargs={"epochs": 300})
