@@ -416,6 +416,56 @@ def test_tune_ctgan_progress_callback_emits_trial_progress_and_eta(tmp_path, mon
     assert any("tuning eta" in message for message in progress_messages)
 
 
+def test_tune_ctgan_progress_callback_emits_initial_fit_state_before_first_epoch_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = []
+    progress_messages: list[str] = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=progress_messages.append,
+    )
+
+    assert any("trial 1/1" in message for message in progress_messages)
+    assert any("0/300" in message for message in progress_messages)
+    assert any("waiting for first fit update" in message for message in progress_messages)
+    assert any("tuning eta" in message for message in progress_messages)
+
+
+def test_fit_progress_capture_estimates_eta_at_start_of_second_trial(monkeypatch):
+    messages: list[str] = []
+    model = DummyCtganGenerative(ctgan_kwargs={"epochs": 300})
+
+    monkeypatch.setattr(tune_mod.time, "monotonic", lambda: 160.0)
+
+    tune_mod._fit_model_with_progress_capture(
+        model=model,
+        train_df=_build_df(),
+        transformed_schema=_build_schema(),
+        total_trials=30,
+        current_trial=2,
+        completed_trials=1,
+        tuning_started_at=100.0,
+        progress_callback=messages.append,
+        total_fit_steps=300,
+    )
+
+    assert messages
+    assert "trial 2/30" in messages[0]
+    assert "0/300" in messages[0]
+    assert "waiting for first fit update" in messages[0]
+    assert "tuning eta calculating" not in messages[0]
+
+
 def test_tune_ctgan_progress_callback_preserves_non_progress_fit_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []

@@ -180,10 +180,13 @@ def _format_tuning_progress_message(
     total_trials: int,
     fit_progress: CtganFitProgress | None,
     eta_seconds: float | None,
+    total_fit_steps: int | None = None,
 ) -> str:
     message = f"trial {current_trial}/{total_trials}"
     if fit_progress is not None:
         message = f"{message} | {fit_progress.display_text}"
+    elif total_fit_steps is not None and total_fit_steps > 0:
+        message = f"{message} | 0/{total_fit_steps} | waiting for first fit update"
     message = f"{message} | tuning eta {_format_eta_seconds(eta_seconds)}"
     return message
 
@@ -233,6 +236,7 @@ def _fit_model_with_progress_capture(
     completed_trials: int,
     tuning_started_at: float,
     progress_callback: Callable[[str], None] | None,
+    total_fit_steps: int | None,
 ) -> None:
     if progress_callback is None:
         model.fit(train_df, transformed_schema)
@@ -266,7 +270,13 @@ def _fit_model_with_progress_capture(
             current_trial=current_trial,
             total_trials=total_trials,
             fit_progress=None,
-            eta_seconds=None,
+            eta_seconds=_estimate_tuning_eta_seconds(
+                elapsed_seconds=time.monotonic() - tuning_started_at,
+                total_trials=total_trials,
+                completed_trials=completed_trials,
+                current_trial_fraction=0.0,
+            ),
+            total_fit_steps=total_fit_steps,
         ),
         force=True,
     )
@@ -506,6 +516,7 @@ def tune_ctgan(
                 completed_trials=completed_trials,
                 tuning_started_at=started_at,
                 progress_callback=progress_callback,
+                total_fit_steps=int(params["epochs"]),
             )
             synth_df = model.sample(len(val_df))
             score, details = _score_synthetic(
