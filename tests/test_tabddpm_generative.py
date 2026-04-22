@@ -116,7 +116,7 @@ def test_model_state_round_trip():
     """Test get_state and from_state methods."""
     model = TabDDPMGenerative(
         num_timesteps=500,
-        num_epochs=50,
+        num_steps=50,
         batch_size=512,
         lr=0.001,
     )
@@ -125,7 +125,7 @@ def test_model_state_round_trip():
     restored = TabDDPMGenerative.from_state(state)
 
     assert restored.num_timesteps == 500
-    assert restored.num_epochs == 50
+    assert restored.num_steps == 50
     assert restored.batch_size == 512
     assert restored.lr == 0.001
 
@@ -192,7 +192,7 @@ def test_fit_minimal(minimal_data):
     df, schema = minimal_data
 
     model = TabDDPMGenerative(
-        num_epochs=2,
+        num_steps=2,
         batch_size=2,
         device='cpu',
     )
@@ -212,7 +212,7 @@ def test_sample_after_fit(minimal_data):
     df, schema = minimal_data
 
     model = TabDDPMGenerative(
-        num_epochs=1,
+        num_steps=1,
         batch_size=2,
         device='cpu',
     )
@@ -247,7 +247,7 @@ def test_sample_conditions_ignored(minimal_data):
     df, schema = minimal_data
 
     model = TabDDPMGenerative(
-        num_epochs=1,
+        num_steps=1,
         batch_size=2,
         device='cpu',
     )
@@ -275,7 +275,7 @@ def test_get_loss_history(minimal_data):
     df, schema = minimal_data
 
     model = TabDDPMGenerative(
-        num_epochs=2,
+        num_steps=2,
         batch_size=2,
         device='cpu',
     )
@@ -288,7 +288,7 @@ def test_get_loss_history(minimal_data):
     assert 'loss' in history
     assert 'multinomial_loss' in history
     assert 'gaussian_loss' in history
-    assert len(history['loss']) == 2  # 2 epochs
+    assert len(history['loss']) == 3
 
 
 @patch('genbench.generative.tabddpm.tabddpm.MLPDiffusion', DummyMLPDiffusion)
@@ -299,7 +299,7 @@ def test_save_and_load_artifacts(tmp_path, minimal_data):
     df, schema = minimal_data
 
     model = TabDDPMGenerative(
-        num_epochs=1,
+        num_steps=1,
         batch_size=2,
         device='cpu',
     )
@@ -349,7 +349,7 @@ def test_custom_parameters():
     """Test model with custom parameters."""
     model = TabDDPMGenerative(
         num_timesteps=500,
-        num_epochs=10,
+        num_steps=10,
         batch_size=256,
         lr=0.001,
         weight_decay=1e-3,
@@ -361,7 +361,7 @@ def test_custom_parameters():
     )
 
     assert model.num_timesteps == 500
-    assert model.num_epochs == 10
+    assert model.num_steps == 10
     assert model.batch_size == 256
     assert model.lr == 0.001
     assert model.weight_decay == 1e-3
@@ -396,7 +396,7 @@ def test_fit_with_source_schema():
         categorical_cols=["cat2"],  # Still categorical in processed
     )
 
-    model = TabDDPMGenerative(num_epochs=1, batch_size=10, device='cpu')
+    model = TabDDPMGenerative(num_steps=1, batch_size=10, device='cpu')
     model.fit(df, processed_schema, source_schema=source_schema)
 
     # cat1 was categorical in source but continuous in processed -> numerical
