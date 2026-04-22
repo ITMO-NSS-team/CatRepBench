@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import re
 import sys
 import time
@@ -81,6 +82,23 @@ class CtganTuningResult:
 
 
 @dataclass(frozen=True)
+class CtganRuntimeEstimateResult:
+    dataset: str
+    encoding_method: str
+    output_dir: Path
+    summary_path: Path
+    representative_params: Dict[str, Any]
+    sample_epochs: int
+    projected_epochs: int
+    projected_total_runs: int
+    fit_seconds_sampled: float
+    post_fit_seconds: float
+    projected_fit_seconds: float
+    projected_trial_seconds: float
+    projected_full_pipeline_seconds: float
+
+
+@dataclass(frozen=True)
 class CtganFitProgress:
     current_step: int
     total_steps: int
@@ -120,6 +138,57 @@ def _jsonify(value: Any) -> Any:
 def _save_json(path: Path, payload: Dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(_jsonify(payload), f, ensure_ascii=False, indent=2)
+
+
+def _build_runtime_estimate_params() -> Dict[str, Any]:
+    """Choose a representative CTGAN config whose runtime proxy is closest to the search-space mean."""
+    embedding_dims = (128, 256)
+    generator_dims = (256, 512)
+    discriminator_dims = (256, 512)
+    batch_sizes = (256, 512, 1024, 2048)
+    discriminator_steps_values = range(1, 6)
+    generator_lr = math.sqrt(1e-4 * 2e-3)
+    lr_ratio = math.sqrt(0.7 * 1.5)
+
+    candidates: list[tuple[float, Dict[str, Any]]] = []
+    for embedding_dim in embedding_dims:
+        for gen_dim in generator_dims:
+            for disc_dim in discriminator_dims:
+                for batch_size in batch_sizes:
+                    for discriminator_steps in discriminator_steps_values:
+                        runtime_proxy = (
+                            float(embedding_dim)
+                            + float(gen_dim)
+                            + float(discriminator_steps) * float(disc_dim)
+                        ) / float(batch_size)
+                        candidates.append(
+                            (
+                                runtime_proxy,
+                                {
+                                    "embedding_dim": embedding_dim,
+                                    "gen_dim": gen_dim,
+                                    "disc_dim": disc_dim,
+                                    "batch_size": batch_size,
+                                    "discriminator_steps": discriminator_steps,
+                                    "generator_lr": generator_lr,
+                                    "lr_ratio": lr_ratio,
+                                },
+                            )
+                        )
+
+    mean_proxy = sum(proxy for proxy, _params in candidates) / float(len(candidates))
+    _, representative = min(
+        candidates,
+        key=lambda item: (
+            abs(item[0] - mean_proxy),
+            abs(int(item[1]["discriminator_steps"]) - 3),
+            abs(int(item[1]["batch_size"]) - 1024),
+            abs(int(item[1]["disc_dim"]) - 512),
+            abs(int(item[1]["gen_dim"]) - 512),
+            abs(int(item[1]["embedding_dim"]) - 256),
+        ),
+    )
+    return dict(representative)
 
 
 def _parse_ctgan_fit_progress_line(raw_line: str) -> CtganFitProgress | None:
@@ -625,6 +694,148 @@ def tune_ctgan(
         trials_path=trials_path,
         best_params_path=best_params_path,
         model_artifacts_dir=model_artifacts_dir,
+    )
+
+
+def estimate_ctgan_runtime(
+    *,
+    df: pd.DataFrame,
+    schema: TabularSchema,
+    dataset: str,
+    encoding_method: str,
+    sample_epochs: int = 10,
+    projected_epochs: int = DEFAULT_CTGAN_EPOCHS,
+    projected_total_runs: int = 35,
+    task_type: Optional[str] = None,
+    holdout_cfg: Optional[SplitConfigHoldout] = None,
+    discrete_cols: Optional[Sequence[str]] = None,
+    output_root: Path | str = Path("experiments/optuna_results"),
+    output_dir: Path | str | None = None,
+    device: str = "cuda",
+    progress_callback: Callable[[str], None] | None = None,
+) -> CtganRuntimeEstimateResult:
+    if sample_epochs <= 0:
+        raise ValueError("sample_epochs must be > 0.")
+    if projected_epochs <= 0:
+        raise ValueError("projected_epochs must be > 0.")
+    if projected_total_runs <= 0:
+        raise ValueError("projected_total_runs must be > 0.")
+    if sample_epochs > projected_epochs:
+        raise ValueError("sample_epochs must be <= projected_epochs.")
+    if device not in {"cpu", "cuda"}:
+        raise ValueError("device must be 'cpu' or 'cuda'.")
+
+    cfg = holdout_cfg or SplitConfigHoldout(val_size=0.2, shuffle=True, random_seed=5)
+    train_df, val_df, transformed_schema, preprocessing_meta = _build_holdout(
+        df=df,
+        schema=schema,
+        encoding_method=encoding_method,
+        task_type=task_type,
+        holdout_cfg=cfg,
+    )
+    is_regression = bool(preprocessing_meta["target_processing"]["is_regression"])
+    used_discrete_cols = (
+        [c for c in discrete_cols if c in train_df.columns]
+        if discrete_cols is not None
+        else default_discrete_cols(
+            schema=transformed_schema,
+            train_df=train_df,
+            include_target_for_classification=(not is_regression),
+        )
+    )
+
+    representative_params = _build_runtime_estimate_params()
+    ctgan_kwargs = build_ctgan_kwargs(
+        representative_params,
+        epochs=sample_epochs,
+        device=device,
+        verbose=False,
+    )
+    model = CtganGenerative(discrete_cols=used_discrete_cols, ctgan_kwargs=ctgan_kwargs)
+
+    if progress_callback is not None:
+        progress_callback(
+            f"estimating runtime | sampled epochs {sample_epochs}/{projected_epochs} | representative trial"
+        )
+
+    fit_started_at = time.monotonic()
+    model.fit(train_df, transformed_schema)
+    fit_seconds_sampled = float(time.monotonic() - fit_started_at)
+
+    post_fit_started_at = time.monotonic()
+    synth_df = model.sample(len(val_df))
+    score, details = _score_synthetic(
+        val_df=val_df,
+        synth_df=synth_df,
+        schema=transformed_schema,
+    )
+    post_fit_seconds = float(time.monotonic() - post_fit_started_at)
+
+    projected_fit_seconds = fit_seconds_sampled * (float(projected_epochs) / float(sample_epochs))
+    projected_trial_seconds = projected_fit_seconds + post_fit_seconds
+    projected_full_pipeline_seconds = projected_trial_seconds * float(projected_total_runs)
+
+    if progress_callback is not None:
+        progress_callback(
+            "estimating runtime | "
+            f"projected trial {_format_eta_seconds(projected_trial_seconds)} | "
+            f"projected full pipeline {_format_eta_seconds(projected_full_pipeline_seconds)}"
+        )
+
+    output_dir = _ensure_dir(
+        Path(output_dir)
+        if output_dir is not None
+        else Path(output_root) / "ctgan_runtime_estimate" / _slug(dataset) / _slug(encoding_method)
+    )
+    summary_path = output_dir / "summary.json"
+    summary_payload: Dict[str, Any] = {
+        "mode": "runtime_estimate",
+        "dataset": dataset,
+        "encoding_method": encoding_method,
+        "sample_epochs": int(sample_epochs),
+        "projected_epochs": int(projected_epochs),
+        "projected_total_runs": int(projected_total_runs),
+        "task_type": "regression" if is_regression else "classification",
+        "representative_params_source": "runtime_proxy_closest_to_mean",
+        "representative_params": representative_params,
+        "used_discrete_cols": used_discrete_cols,
+        "objective_metric": "wasserstein_mean",
+        "objective_score_sampled": float(score),
+        "objective_details": details,
+        "holdout": {
+            "val_size": float(cfg.val_size),
+            "shuffle": bool(cfg.shuffle),
+            "random_seed": int(cfg.random_seed),
+        },
+        "preprocessing": preprocessing_meta,
+        "n_rows_train_transformed": int(len(train_df)),
+        "n_rows_val_transformed": int(len(val_df)),
+        "n_cols_train_transformed": int(train_df.shape[1]),
+        "fit_seconds_sampled": float(fit_seconds_sampled),
+        "fit_seconds_per_epoch_sampled": float(fit_seconds_sampled / float(sample_epochs)),
+        "post_fit_seconds": float(post_fit_seconds),
+        "projected_fit_seconds": float(projected_fit_seconds),
+        "projected_trial_seconds": float(projected_trial_seconds),
+        "projected_trial_hours": float(projected_trial_seconds / 3600.0),
+        "projected_full_pipeline_seconds": float(projected_full_pipeline_seconds),
+        "projected_full_pipeline_hours": float(projected_full_pipeline_seconds / 3600.0),
+    }
+    _save_json(summary_path, summary_payload)
+
+    return CtganRuntimeEstimateResult(
+        dataset=dataset,
+        encoding_method=encoding_method,
+        output_dir=output_dir,
+        summary_path=summary_path,
+        representative_params=representative_params,
+        sample_epochs=sample_epochs,
+        projected_epochs=projected_epochs,
+        projected_total_runs=projected_total_runs,
+        fit_seconds_sampled=fit_seconds_sampled,
+        post_fit_seconds=post_fit_seconds,
+        projected_fit_seconds=projected_fit_seconds,
+        projected_trial_seconds=projected_trial_seconds,
+        projected_full_pipeline_seconds=projected_full_pipeline_seconds,
     )
 
 

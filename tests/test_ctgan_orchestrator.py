@@ -381,6 +381,10 @@ def test_build_runner_argv_passes_common_best_params_file_skip_tuning_and_device
         device="cuda",
         poster_fast=True,
         max_rows=5000,
+        estimate_runtime=True,
+        estimate_sample_epochs=12,
+        estimate_total_epochs=300,
+        estimate_total_runs=35,
     )
 
     assert "--best-params-file" in argv
@@ -389,6 +393,10 @@ def test_build_runner_argv_passes_common_best_params_file_skip_tuning_and_device
     assert "--poster-fast" in argv
     assert "--max-rows" in argv
     assert "5000" in argv
+    assert "--estimate-runtime" in argv
+    assert "--estimate-sample-epochs" in argv
+    assert "12" in argv
+    assert "--estimate-total-runs" in argv
     assert argv[-2:] == ["--device", "cuda"]
 
 
@@ -429,6 +437,11 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
             "--poster-fast",
             "--max-rows",
             "5000",
+            "--estimate-runtime",
+            "--estimate-sample-epochs",
+            "12",
+            "--estimate-total-runs",
+            "35",
             "--device",
             "cuda",
         ]
@@ -440,6 +453,9 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
     assert captured["continue_on_failure"] is True
     assert captured["poster_fast"] is True
     assert captured["max_rows"] == 5000
+    assert captured["estimate_runtime"] is True
+    assert captured["estimate_sample_epochs"] == 12
+    assert captured["estimate_total_runs"] == 35
     assert captured["device"] == "cuda"
 
 

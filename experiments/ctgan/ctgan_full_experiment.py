@@ -19,7 +19,7 @@ from experiments.ctgan.ctgan_common import (
     default_discrete_cols,
 )
 from experiments.ctgan.orchestrator_staff.ctgan_manifest import load_ctgan_manifest
-from experiments.ctgan.ctgan_tuning import select_ctgan_best_params
+from experiments.ctgan.ctgan_tuning import estimate_ctgan_runtime, select_ctgan_best_params
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigHoldout, SplitConfigKFold
@@ -444,6 +444,95 @@ def _run_holdout_split(
     )
 
 
+def run_ctgan_runtime_estimate(
+    *,
+    manifest_path: Path | str,
+    dataset_id: str,
+    dataset_label: str,
+    encoding_method: str,
+    output_root: Path | str = Path("experiments/results"),
+    progress_stream: TextIO | None = None,
+    progress_format: str = "jsonl",
+    device: str = "cuda",
+    max_rows: int | None = None,
+    estimate_sample_epochs: int = 10,
+    estimate_total_epochs: int = DEFAULT_CTGAN_EPOCHS,
+    estimate_total_runs: int = 35,
+):
+    manifest_path = Path(manifest_path).resolve()
+    project_root = _infer_project_root(manifest_path)
+    output_dir = _ensure_dir(Path(output_root) / "ctgan" / dataset_id / encoding_method / "runtime_estimate")
+
+    _emit_progress(
+        stage="launching",
+        message="loading manifest and dataset",
+        progress_stream=progress_stream,
+        progress_format=progress_format,
+        dataset_id=dataset_id,
+        encoding_method=encoding_method,
+    )
+
+    manifest = load_ctgan_manifest(manifest_path, project_root=project_root)
+    dataset = manifest.resolve_dataset_label(dataset_label)
+    encoding = _resolve_manifest_encoding(manifest, encoding_method=encoding_method)
+    if dataset.dataset_id != dataset_id:
+        raise ValueError(
+            f"dataset_id mismatch for label {dataset_label!r}: "
+            f"expected {dataset.dataset_id!r}, got {dataset_id!r}"
+        )
+    if encoding.encoding_id != encoding_method:
+        raise ValueError(
+            f"encoding_method mismatch: expected {encoding.encoding_id!r}, got {encoding_method!r}"
+        )
+
+    df = pd.read_csv(project_root / "datasets" / "raw" / f"{dataset_id}.csv")
+    df = _cap_dataframe_rows(df, max_rows=max_rows)
+    schema = TabularSchema.infer_from_dataframe(
+        df,
+        target_col=dataset.target_col,
+        id_col=dataset.id_col,
+    )
+
+    is_regression: bool | None = None
+    if dataset.target_col is not None:
+        is_regression = bool(infer_is_regression_target(df[dataset.target_col]))
+
+    def emit_estimate_progress(message: str) -> None:
+        _emit_progress(
+            stage="tuning",
+            message=message,
+            progress_stream=progress_stream,
+            progress_format=progress_format,
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+        )
+
+    emit_estimate_progress("estimating representative ctgan runtime")
+    result = estimate_ctgan_runtime(
+        df=df,
+        schema=schema,
+        dataset=dataset.label,
+        encoding_method=encoding_method,
+        task_type=_task_type_from_flag(is_regression),
+        output_dir=output_dir,
+        device=device,
+        sample_epochs=estimate_sample_epochs,
+        projected_epochs=estimate_total_epochs,
+        projected_total_runs=estimate_total_runs,
+        progress_callback=emit_estimate_progress,
+    )
+
+    _emit_progress(
+        stage="saving",
+        message="writing estimate summary",
+        progress_stream=progress_stream,
+        progress_format=progress_format,
+        dataset_id=dataset_id,
+        encoding_method=encoding_method,
+    )
+    return result
+
+
 def run_full_ctgan_experiment(
     *,
     manifest_path: Path | str,
@@ -692,23 +781,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-tuning", action="store_true")
     parser.add_argument("--poster-fast", action="store_true")
     parser.add_argument("--max-rows", type=int)
+    parser.add_argument("--estimate-runtime", action="store_true")
+    parser.add_argument("--estimate-sample-epochs", type=int, default=10)
+    parser.add_argument("--estimate-total-epochs", type=int, default=DEFAULT_CTGAN_EPOCHS)
+    parser.add_argument("--estimate-total-runs", type=int, default=35)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args(argv)
 
-    run_full_ctgan_experiment(
-        manifest_path=args.manifest,
-        dataset_id=args.dataset_id,
-        dataset_label=args.dataset_label,
-        encoding_method=args.encoding_method,
-        output_root=args.output_root,
-        progress_stream=sys.stdout,
-        progress_format=args.progress_format,
-        best_params_file=Path(args.best_params_file).resolve() if args.best_params_file else None,
-        skip_tuning=args.skip_tuning,
-        device=args.device,
-        poster_fast=args.poster_fast,
-        max_rows=args.max_rows,
-    )
+    common_kwargs = {
+        "manifest_path": args.manifest,
+        "dataset_id": args.dataset_id,
+        "dataset_label": args.dataset_label,
+        "encoding_method": args.encoding_method,
+        "output_root": args.output_root,
+        "progress_stream": sys.stdout,
+        "progress_format": args.progress_format,
+        "device": args.device,
+        "max_rows": args.max_rows,
+    }
+    if args.estimate_runtime:
+        run_ctgan_runtime_estimate(
+            **common_kwargs,
+            estimate_sample_epochs=args.estimate_sample_epochs,
+            estimate_total_epochs=args.estimate_total_epochs,
+            estimate_total_runs=args.estimate_total_runs,
+        )
+    else:
+        run_full_ctgan_experiment(
+            **common_kwargs,
+            best_params_file=Path(args.best_params_file).resolve() if args.best_params_file else None,
+            skip_tuning=args.skip_tuning,
+            poster_fast=args.poster_fast,
+        )
     return 0
 
 

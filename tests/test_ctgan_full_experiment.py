@@ -219,6 +219,31 @@ def fake_run_full_experiment(
     return SimpleNamespace(output_dir=output_dir)
 
 
+def fake_run_runtime_estimate(
+    *,
+    output_root,
+    dataset_id,
+    encoding_method,
+    progress_stream=None,
+    **kwargs,
+):
+    output_dir = Path(output_root) / "ctgan" / dataset_id / encoding_method / "runtime_estimate"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "summary.json"
+    summary_path.write_text(json.dumps({"mode": "runtime_estimate"}), encoding="utf-8")
+    lines = [
+        json.dumps({"event": "progress", "stage": "tuning", "message": "estimating runtime"}),
+        json.dumps({"event": "progress", "stage": "saving", "message": "writing estimate summary"}),
+    ]
+    for line in lines:
+        if progress_stream is None:
+            print(line)
+        else:
+            progress_stream.write(line + "\n")
+            progress_stream.flush()
+    return SimpleNamespace(output_dir=output_dir, summary_path=summary_path)
+
+
 def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
@@ -636,6 +661,44 @@ def test_cli_passes_poster_fast_and_max_rows(monkeypatch, tmp_path):
     assert exit_code == 0
     assert captured["poster_fast"] is True
     assert captured["max_rows"] == 5
+
+
+def test_cli_routes_to_runtime_estimate_mode(monkeypatch, tmp_path):
+    manifest_path = write_runner_manifest(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return fake_run_runtime_estimate(**kwargs)
+
+    monkeypatch.setattr(full_mod, "run_ctgan_runtime_estimate", fake_runner)
+
+    exit_code = full_mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--dataset-id",
+            "openml_adult",
+            "--dataset-label",
+            "adult",
+            "--encoding-method",
+            "one_hot_representation",
+            "--output-root",
+            str(tmp_path / "results"),
+            "--estimate-runtime",
+            "--estimate-sample-epochs",
+            "12",
+            "--estimate-total-runs",
+            "35",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["estimate_sample_epochs"] == 12
+    assert captured["estimate_total_runs"] == 35
+    assert captured["device"] == "cpu"
 
 
 def test_full_experiment_cli_help_runs_as_script():

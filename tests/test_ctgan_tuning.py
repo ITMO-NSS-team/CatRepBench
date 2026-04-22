@@ -511,3 +511,46 @@ def test_tune_ctgan_progress_callback_preserves_non_progress_fit_output(tmp_path
 
     captured = capsys.readouterr()
     assert "warning: fit emitted diagnostics" in captured.err
+
+
+def test_estimate_ctgan_runtime_projects_sampled_fit_to_full_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = []
+    monkeypatch.setattr(
+        tune_mod,
+        "_score_synthetic",
+        lambda **kwargs: (0.25, {"objective_score": 0.25, "wasserstein_mean": 0.25}),
+    )
+
+    monotonic_values = iter([10.0, 22.0, 22.0, 25.0])
+    monkeypatch.setattr(tune_mod.time, "monotonic", lambda: next(monotonic_values))
+
+    result = tune_mod.estimate_ctgan_runtime(
+        df=_build_df(n=50),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        sample_epochs=10,
+        projected_epochs=300,
+        projected_total_runs=35,
+        output_dir=tmp_path / "estimate",
+        device="cpu",
+    )
+
+    assert result.summary_path.exists()
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 10
+    assert result.projected_trial_seconds == pytest.approx(363.0)
+    assert result.projected_full_pipeline_seconds == pytest.approx(12705.0)
+
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "runtime_estimate"
+    assert payload["sample_epochs"] == 10
+    assert payload["projected_epochs"] == 300
+    assert payload["projected_total_runs"] == 35
+    assert payload["fit_seconds_sampled"] == pytest.approx(12.0)
+    assert payload["post_fit_seconds"] == pytest.approx(3.0)
+    assert payload["projected_fit_seconds"] == pytest.approx(360.0)
+    assert payload["projected_trial_seconds"] == pytest.approx(363.0)
+    assert payload["projected_full_pipeline_hours"] == pytest.approx(12705.0 / 3600.0)

@@ -90,6 +90,10 @@ def run_once(
     continue_on_failure: bool = False,
     poster_fast: bool = False,
     max_rows: int | None = None,
+    estimate_runtime: bool = False,
+    estimate_sample_epochs: int = 10,
+    estimate_total_epochs: int = 300,
+    estimate_total_runs: int = 35,
 ) -> OrchestratorRunResult:
     del worksheet_name
 
@@ -139,6 +143,10 @@ def run_once(
                 device=device,
                 poster_fast=poster_fast,
                 max_rows=max_rows,
+                estimate_runtime=estimate_runtime,
+                estimate_sample_epochs=estimate_sample_epochs,
+                estimate_total_epochs=estimate_total_epochs,
+                estimate_total_runs=estimate_total_runs,
             )
         )
 
@@ -237,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--continue-on-failure", action="store_true")
     parser.add_argument("--poster-fast", action="store_true")
     parser.add_argument("--max-rows", type=int)
+    parser.add_argument("--estimate-runtime", action="store_true")
+    parser.add_argument("--estimate-sample-epochs", type=int, default=10)
+    parser.add_argument("--estimate-total-epochs", type=int, default=300)
+    parser.add_argument("--estimate-total-runs", type=int, default=35)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -257,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
         continue_on_failure=args.continue_on_failure,
         poster_fast=args.poster_fast,
         max_rows=args.max_rows,
+        estimate_runtime=args.estimate_runtime,
+        estimate_sample_epochs=args.estimate_sample_epochs,
+        estimate_total_epochs=args.estimate_total_epochs,
+        estimate_total_runs=args.estimate_total_runs,
     )
     return result.exit_code
 
@@ -529,6 +545,10 @@ def _build_runner_argv(
     device: str,
     poster_fast: bool,
     max_rows: int | None,
+    estimate_runtime: bool,
+    estimate_sample_epochs: int,
+    estimate_total_epochs: int,
+    estimate_total_runs: int,
 ) -> list[str]:
     argv = [
         sys.executable,
@@ -554,6 +574,11 @@ def _build_runner_argv(
         argv.append("--poster-fast")
     if max_rows is not None:
         argv.extend(["--max-rows", str(int(max_rows))])
+    if estimate_runtime:
+        argv.append("--estimate-runtime")
+        argv.extend(["--estimate-sample-epochs", str(int(estimate_sample_epochs))])
+        argv.extend(["--estimate-total-epochs", str(int(estimate_total_epochs))])
+        argv.extend(["--estimate-total-runs", str(int(estimate_total_runs))])
     argv.extend(["--device", device])
     return argv
 
