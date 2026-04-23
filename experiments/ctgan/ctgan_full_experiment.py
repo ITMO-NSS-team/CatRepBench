@@ -953,7 +953,9 @@ def _maybe_upload_to_drive(
         )
     except Exception as exc:  # noqa: BLE001
         # Drive upload is best-effort — do not crash the experiment
+        import traceback
         print(f"[ctgan_drive] WARNING: Drive upload failed: {exc}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
 
 
 if __name__ == "__main__":
