@@ -106,7 +106,6 @@ def test_tune_tabddpm_saves_outputs_and_returns_params(tmp_path, monkeypatch):
         dataset="adult sample",
         encoding_method="one_hot_representation",
         n_trials=2,
-        epochs=1,
         seed=7,
         output_root=tmp_path / "optuna_results",
         device="cpu",
@@ -132,6 +131,11 @@ def test_tune_tabddpm_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert payload["preprocessing"][
                "representation_name"] == "one_hot_representation"
     assert payload["preprocessing"]["discrete_unique_threshold"] == 20
+    assert "steps" in payload
+    assert isinstance(payload["steps"], int)
+    assert payload["steps"] > 0
+    assert "num_steps" in DummyTabDDPMGenerative.created[0].params
+    assert "num_steps" in result.best_params
 
     # Проверяем, что мок-модель вызывалась корректно
     assert DummyTabDDPMGenerative.created
@@ -160,7 +164,6 @@ def test_tune_tabddpm_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):
         dataset="adult",
         encoding_method="ordinal_representation",
         n_trials=1,
-        epochs=1,
         seed=11,
         output_root=tmp_path / "optuna_results",
         save_model=True,
@@ -182,7 +185,6 @@ def test_tune_tabddpm_and_return_params_wrapper(tmp_path, monkeypatch):
         dataset="my ds",
         encoding_method="one_hot_representation",
         n_trials=1,
-        epochs=1,
         seed=13,
         output_root=tmp_path / "optuna_results",
         device="cpu",
@@ -205,7 +207,6 @@ def test_tune_tabddpm_regression_branch_scales_target_and_keeps_it_continuous(
         dataset="housing",
         encoding_method="one_hot_representation",
         n_trials=1,
-        epochs=1,
         seed=17,
         output_root=tmp_path / "optuna_results",
         device="cpu",
@@ -231,7 +232,6 @@ def test_tune_tabddpm_holdout_split_is_independent_from_optuna_seed(tmp_path,
         dataset="seed-a",
         encoding_method="one_hot_representation",
         n_trials=1,
-        epochs=1,
         seed=1,
         output_root=tmp_path / "optuna_results",
         device="cpu",
@@ -242,7 +242,6 @@ def test_tune_tabddpm_holdout_split_is_independent_from_optuna_seed(tmp_path,
         dataset="seed-b",
         encoding_method="one_hot_representation",
         n_trials=1,
-        epochs=1,
         seed=999,
         output_root=tmp_path / "optuna_results",
         device="cpu",
@@ -269,7 +268,6 @@ def test_tune_tabddpm_raises_on_invalid_encoding_method(tmp_path, monkeypatch):
             dataset="adult",
             encoding_method="one hot",
             n_trials=1,
-            epochs=1,
             output_root=tmp_path / "optuna_results",
             device="cpu",
         )
@@ -297,7 +295,6 @@ def test_tune_tabddpm_retypes_high_cardinality_integer_feature_as_continuous(
         dataset="high-card",
         encoding_method="ordinal_representation",
         n_trials=1,
-        epochs=1,
         output_root=tmp_path / "optuna_results",
         device="cpu",
     )
@@ -336,7 +333,6 @@ def test_tune_tabddpm_label_encodes_categorical_target_for_classification(
         dataset="categorical-target",
         encoding_method="one_hot_representation",
         n_trials=1,
-        epochs=1,
         output_root=tmp_path / "optuna_results",
         device="cpu",
     )

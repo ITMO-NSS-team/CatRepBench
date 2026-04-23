@@ -11,7 +11,6 @@ Available tune_tabddpm flags:
 - encoding_method (str): Representation id. Must be one of
   `genbench.transforms.categorical.list_registered_representations()`.
 - n_trials (int, default=30): Optuna trial budget.
-- epochs (int, default=100): TabDDPM training epochs per trial.
 - seed (int, default=42): Seed for Optuna sampler and trial reproducibility.
 - task_type (Optional[str], default=None): "classification" or "regression".
   If None, inferred from target dtype/cardinality.
@@ -72,7 +71,7 @@ class TabDDPMTuningResult:
     best_params: Dict[str, Any]
     best_source: str
     n_trials: int
-    epochs: int
+    steps: int
     duration_seconds: float
     summary_path: Path
     trials_path: Path
@@ -167,14 +166,15 @@ def _suggest_mlp_layers(trial: optuna.Trial) -> List[int]:
 def _suggest_tabddpm_params(
         trial: optuna.Trial,
         *,
-        epochs: int,
         device: str,
 ) -> Dict[str, Any]:
     """Sample hyperparameters for TabDDPM."""
 
-    num_timesteps = trial.suggest_categorical("num_timesteps", [100, 1000])
-    batch_size = trial.suggest_categorical("batch_size", [256, 4096])
-    lr = trial.suggest_float("lr", 1e-5, 3e-3, log=True)
+    lr = trial.suggest_float("lr", 1e-5, 0.1, log=True)
+    batch_size = trial.suggest_int("batch_size", 256, 4096, log=True)
+    num_timesteps = trial.suggest_int("num_timesteps", 10, 1000)
+    num_steps = trial.suggest_int("num_steps", 1000, 10000, log=True)
+
     d_layers = _suggest_mlp_layers(trial)
 
     weight_decay = 0.0
@@ -185,7 +185,7 @@ def _suggest_tabddpm_params(
 
     return {
         "num_timesteps": num_timesteps,
-        "num_epochs": epochs,
+        "num_steps": num_steps,
         "batch_size": batch_size,
         "lr": lr,
         "weight_decay": weight_decay,
@@ -300,7 +300,6 @@ def tune_tabddpm(
         dataset: str,
         encoding_method: str,
         n_trials: int = 30,
-        epochs: int = 100,
         seed: int = 42,
         task_type: Optional[str] = None,
         holdout_cfg: Optional[SplitConfigHoldout] = None,
@@ -317,8 +316,6 @@ def tune_tabddpm(
     """
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0.")
-    if epochs <= 0:
-        raise ValueError("epochs must be > 0.")
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'.")
     encoding_method = _validate_encoding_method(encoding_method)
@@ -349,7 +346,7 @@ def tune_tabddpm(
     )
 
     def objective(trial: optuna.Trial) -> float:
-        params = _suggest_tabddpm_params(trial, epochs=epochs, device=device)
+        params = _suggest_tabddpm_params(trial, device=device)
         model = TabDDPMGenerative(**params)
         try:
             model.fit(train_df, transformed_schema, source_schema=schema)
@@ -385,10 +382,10 @@ def tune_tabddpm(
 
     full_best_params = _suggest_tabddpm_params(
         trial=optuna.trial.FixedTrial(dict(study.best_trial.params)),
-        epochs=int(epochs),
         device=device,
     )
 
+    best_num_steps = full_best_params['num_steps']
     best_value = float(study.best_value)
     best_source = "stage1"
 
@@ -417,7 +414,7 @@ def tune_tabddpm(
         "best_value": best_value,
         "best_params": full_best_params,
         "n_trials": int(n_trials),
-        "epochs": int(epochs),
+        "steps": best_num_steps,
         "seed": int(seed),
         "task_type": "regression" if is_regression else "classification",
         "objective_metric": "wasserstein_mean",
@@ -445,7 +442,7 @@ def tune_tabddpm(
         best_params=full_best_params,
         best_source=best_source,
         n_trials=n_trials,
-        epochs=epochs,
+        steps=best_num_steps,
         duration_seconds=duration_seconds,
         summary_path=summary_path,
         trials_path=trials_path,
