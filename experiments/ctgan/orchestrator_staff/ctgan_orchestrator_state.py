@@ -205,8 +205,8 @@ def find_first_claimable_cell(
     )
 
     current_time = now or datetime.now(timezone.utc)
-    for encoding_offset, _encoding_label in enumerate(validated_encoding_headers, start=2):
-        for dataset_offset, _dataset_label in enumerate(validated_dataset_headers, start=2):
+    for dataset_offset, _dataset_label in enumerate(validated_dataset_headers, start=2):
+        for encoding_offset, _encoding_label in enumerate(validated_encoding_headers, start=2):
             coord = f"{_column_name(dataset_offset)}{encoding_offset}"
             payload = parse_cell_payload(cell_values.get(coord))
             if payload.is_claimable(now=current_time):

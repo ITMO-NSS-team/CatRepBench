@@ -7,8 +7,9 @@ genbench/data/__pycache__/__init__.cpython-310.pyc
 /legacy/
 datasets/raw/*.csv
 
-# Secrets — никогда не коммитить
+# Secrets
 .env
 *.env
 gsheets-service-account.json
 *service_account*.json
+oauth_token.json

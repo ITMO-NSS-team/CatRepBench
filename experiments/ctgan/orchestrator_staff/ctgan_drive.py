@@ -89,6 +89,10 @@ class DriveConfig:
 
     service_account_path: Path | None = None
     service_account_info: dict[str, Any] | None = None
+    oauth_token_path: Path | None = None
+    """Path to OAuth2 token JSON (generated via InstalledAppFlow).
+    When set, Drive uploads use this token instead of the service account,
+    which avoids the 'Service Accounts do not have storage quota' error."""
 
     @classmethod
     def from_env(cls) -> "DriveConfig":
@@ -97,11 +101,13 @@ class DriveConfig:
         Required:
             CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID
 
-        Credentials are read from the same env vars as SheetsConfig:
+        Drive credentials (pick one):
+            CATREPBENCH_GDRIVE_OAUTH_TOKEN_PATH   — OAuth2 token (recommended)
             CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH  OR
-            CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON
+            CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON  — service account fallback
         """
         results_folder_id = os.getenv("CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID", "").strip()
+        oauth_token_path = os.getenv("CATREPBENCH_GDRIVE_OAUTH_TOKEN_PATH", "").strip()
         service_account_path = os.getenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH", "").strip()
         service_account_json = os.getenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON", "").strip()
 
@@ -110,15 +116,18 @@ class DriveConfig:
             missing.append("CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID")
 
         inline_info: dict[str, Any] | None = None
-        if service_account_json:
-            try:
-                inline_info = json.loads(service_account_json)
-            except json.JSONDecodeError as exc:
-                raise ValueError("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON must be valid JSON") from exc
-        elif not service_account_path:
-            missing.append(
-                "CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH or CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON"
-            )
+        if not oauth_token_path:
+            if service_account_json:
+                try:
+                    inline_info = json.loads(service_account_json)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON must be valid JSON") from exc
+            elif not service_account_path:
+                missing.append(
+                    "CATREPBENCH_GDRIVE_OAUTH_TOKEN_PATH or "
+                    "CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH or "
+                    "CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON"
+                )
 
         if missing:
             raise ValueError(
@@ -129,6 +138,7 @@ class DriveConfig:
             results_folder_id=results_folder_id,
             service_account_path=Path(service_account_path).expanduser() if service_account_path else None,
             service_account_info=inline_info,
+            oauth_token_path=Path(oauth_token_path).expanduser() if oauth_token_path else None,
         )
 
     @classmethod
@@ -159,6 +169,26 @@ class DriveClient:
 
     @staticmethod
     def _build_credentials(config: DriveConfig) -> Any:
+        # --- OAuth2 user credentials (preferred — avoids service-account quota error) ---
+        if config.oauth_token_path is not None:
+            try:
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request
+            except ImportError as exc:
+                raise RuntimeError(
+                    "google-auth is required. Install requirements.txt first."
+                ) from exc
+            token_path = config.oauth_token_path
+            # Don't pass scopes here — use whatever scopes the token was granted with.
+            # Passing extra scopes causes invalid_scope on refresh.
+            creds = Credentials.from_authorized_user_file(str(token_path))
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                with open(token_path, "w", encoding="utf-8") as fh:
+                    fh.write(creds.to_json())
+            return creds
+
+        # --- Service account fallback ---
         try:
             from google.oauth2 import service_account
         except ImportError as exc:
@@ -176,7 +206,9 @@ class DriveClient:
                 filename=str(config.service_account_path),
                 scopes=_DRIVE_SCOPES,
             )
-        raise ValueError("DriveConfig must define service_account_path or service_account_info")
+        raise ValueError(
+            "DriveConfig must define oauth_token_path, service_account_path, or service_account_info"
+        )
 
     @classmethod
     def _build_service(cls, config: DriveConfig) -> Any:
@@ -206,7 +238,13 @@ class DriveClient:
         def _search() -> list[dict[str, Any]]:
             return (
                 self._service.files()
-                .list(q=query, fields="files(id,name)", spaces="drive")
+                .list(
+                    q=query,
+                    fields="files(id,name)",
+                    spaces="drive",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
                 .execute()
                 .get("files", [])
             )
@@ -257,16 +295,18 @@ class DriveClient:
             ) from exc
 
         mime_type = _guess_mime_type(local_path)
-        metadata: dict[str, Any] = {
-            "name": local_path.name,
-            "parents": [parent_folder_id],
-        }
+        metadata: dict[str, Any] = {"name": local_path.name, "parents": [parent_folder_id]}
         media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
 
         def _upload() -> dict[str, Any]:
             return (
                 self._service.files()
-                .create(body=metadata, media_body=media, fields="id")
+                .create(
+                    body=metadata,
+                    media_body=media,
+                    fields="id",
+                    supportsAllDrives=True,
+                )
                 .execute()
             )
 

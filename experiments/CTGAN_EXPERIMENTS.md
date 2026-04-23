@@ -231,6 +231,27 @@ python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
   --worksheet CTGAN
 ```
 
+### Full pipeline launch command
+
+Use this command when you want the strict full pipeline for each claimed cell:
+
+- with tuning enabled
+- with full cross-validation
+- without `--best-params-file`
+- without `--skip-tuning`
+- without `--poster-fast`
+
+```bash
+mkdir -p experiments/results/orchestrator_logs
+nohup .venv/bin/python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
+  --worksheet CTGAN \
+  --continue-on-failure \
+  --device cuda \
+  > experiments/results/orchestrator_logs/orchestrator-full-pipeline.log 2>&1 < /dev/null &
+echo "PID=$!"
+```
+
 Behavior:
 
 - the orchestrator claims the first available job

@@ -69,9 +69,9 @@ def _load_dataset_entries(payload: object, *, project_root: Path) -> tuple[Datas
 
     labels: list[tuple[str, str]] = []
     ids: list[tuple[str, str]] = []
-    normalized_rows: list[tuple[str, str, str, Optional[str]]] = []
+    normalized_rows: list[tuple[int, str, str, str, Optional[str]]] = []
 
-    for item in payload:
+    for index, item in enumerate(payload):
         if not isinstance(item, dict):
             raise ValueError("dataset entries must be objects.")
         label = _require_str(item.get("label"), field_name="datasets.label")
@@ -85,12 +85,12 @@ def _load_dataset_entries(payload: object, *, project_root: Path) -> tuple[Datas
 
         labels.append((label, _normalize_key(label)))
         ids.append((dataset_id, _normalize_key(dataset_id)))
-        normalized_rows.append((label, dataset_id, target_col, id_col))
+        normalized_rows.append((index, label, dataset_id, target_col, id_col))
 
     _ensure_unique(labels, kind="dataset label")
     _ensure_unique(ids, kind="dataset_id")
 
-    return tuple(
+    entries = [
         DatasetEntry(
             label=label,
             dataset_id=dataset_id,
@@ -98,8 +98,31 @@ def _load_dataset_entries(payload: object, *, project_root: Path) -> tuple[Datas
             id_col=id_col,
             csv_path=project_root / "datasets" / "raw" / f"{dataset_id}.csv",
         )
-        for label, dataset_id, target_col, id_col in normalized_rows
+        for _index, label, dataset_id, target_col, id_col in normalized_rows
+    ]
+    row_counts = {
+        entry.dataset_id: _count_csv_rows(entry.csv_path)
+        for entry in entries
+    }
+
+    sorted_entries = sorted(
+        zip(normalized_rows, entries, strict=True),
+        key=lambda item: (
+            row_counts[item[1].dataset_id] is None,
+            row_counts[item[1].dataset_id] if row_counts[item[1].dataset_id] is not None else item[0][0],
+            item[0][0],
+        ),
     )
+    return tuple(entry for _row_meta, entry in sorted_entries)
+
+
+def _count_csv_rows(csv_path: Path) -> int | None:
+    try:
+        with csv_path.open(encoding="utf-8", newline="") as f:
+            row_count = sum(1 for _ in f) - 1
+    except OSError:
+        return None
+    return max(row_count, 0)
 
 
 def _load_encoding_entries(payload: object) -> tuple[EncodingEntry, ...]:
