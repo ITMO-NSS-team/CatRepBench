@@ -340,6 +340,28 @@ def _compute_tstr_scores(
     return {"status": "ok", **scores}
 
 
+def _save_model_artifacts(model: Any, artifacts_dir: Path, split_id: int) -> None:
+    """Save model checkpoint and loss history CSV for one fold."""
+    fold_dir = _ensure_dir(artifacts_dir / f"fold_{split_id}")
+    try:
+        model.save_artifacts(fold_dir)
+    except Exception:
+        pass
+
+    try:
+        loss_history = model.get_loss_history()
+        if loss_history:
+            rows = [
+                {"epoch": i, "generator_loss": g, "discriminator_loss": d}
+                for i, (g, d) in enumerate(
+                    zip(loss_history["generator_loss"], loss_history["discriminator_loss"])
+                )
+            ]
+            pd.DataFrame(rows).to_csv(fold_dir / "loss_history.csv", index=False)
+    except Exception:
+        pass
+
+
 def _evaluate_prepared_split(
     *,
     split_id: int,
@@ -348,6 +370,7 @@ def _evaluate_prepared_split(
     best_params: dict[str, Any],
     device: str,
     is_regression: bool | None,
+    artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
     ctgan_kwargs = build_ctgan_kwargs(best_params, epochs=DEFAULT_CTGAN_EPOCHS, device=device)
     discrete_cols = default_discrete_cols(
@@ -357,6 +380,10 @@ def _evaluate_prepared_split(
     )
     model = CtganGenerative(discrete_cols=discrete_cols, ctgan_kwargs=ctgan_kwargs)
     model.fit(split_data.train_transformed, split_data.transformed_schema)
+
+    if artifacts_dir is not None:
+        _save_model_artifacts(model, artifacts_dir, split_id)
+
     synth_df = model.sample(len(split_data.train_transformed)).reset_index(drop=True)
 
     distribution_scores = _compute_distribution_scores(
@@ -399,6 +426,7 @@ def _run_crossval_fold(
     best_params: dict[str, Any],
     device: str,
     is_regression: bool | None,
+    artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
     split_cfg = SplitConfigKFold(n_splits=5, shuffle=True, random_seed=42)
     fold_data = _prepare_fold_data(
@@ -416,6 +444,7 @@ def _run_crossval_fold(
         best_params=best_params,
         device=device,
         is_regression=is_regression,
+        artifacts_dir=artifacts_dir,
     )
 
 
@@ -427,6 +456,7 @@ def _run_holdout_split(
     best_params: dict[str, Any],
     device: str,
     is_regression: bool | None,
+    artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
     holdout_data = _prepare_holdout_data(
         df=df,
@@ -441,6 +471,7 @@ def _run_holdout_split(
         best_params=best_params,
         device=device,
         is_regression=is_regression,
+        artifacts_dir=artifacts_dir,
     )
 
 
@@ -644,6 +675,7 @@ def run_full_ctgan_experiment(
         encoding_method=encoding_method,
     )
     per_fold_dir = _ensure_dir(run_dir / "crossval" / "per_fold")
+    artifacts_dir = _ensure_dir(run_dir / "artifacts")
     fold_results: list[dict[str, Any]] = []
     if poster_fast:
         fold_payload = _run_holdout_split(
@@ -653,6 +685,7 @@ def run_full_ctgan_experiment(
             best_params=dict(tuning_result["best_params"]),
             device=device,
             is_regression=is_regression,
+            artifacts_dir=artifacts_dir,
         )
         fold_results.append(fold_payload)
         _save_json(per_fold_dir / "fold_0.json", fold_payload)
@@ -667,6 +700,7 @@ def run_full_ctgan_experiment(
                 best_params=dict(tuning_result["best_params"]),
                 device=device,
                 is_regression=is_regression,
+                artifacts_dir=artifacts_dir,
             )
             fold_results.append(fold_payload)
             _save_json(per_fold_dir / f"fold_{fold_id}.json", fold_payload)
@@ -762,6 +796,21 @@ def run_full_ctgan_experiment(
         },
     )
 
+    # ------------------------------------------------------------------
+    # Optional: upload artifacts to Google Drive and record metrics in
+    # the Results sheet.  Silently skipped if Drive env vars are absent.
+    # ------------------------------------------------------------------
+    _maybe_upload_to_drive(
+        run_dir=run_dir,
+        aggregate_metrics_path=aggregate_metrics_path,
+        dataset_id=dataset_id,
+        dataset_label=dataset_label,
+        encoding_method=encoding_method,
+        encoding_label=encoding.label,
+        progress_stream=progress_stream,
+        progress_format=progress_format,
+    )
+
     return FullCtganExperimentResult(
         output_dir=run_dir,
         summary_path=summary_path,
@@ -769,7 +818,21 @@ def run_full_ctgan_experiment(
     )
 
 
+def _load_dotenv() -> None:
+    """Load .env from the project root if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    for parent in Path(__file__).resolve().parents:
+        env_file = parent / ".env"
+        if env_file.exists():
+            load_dotenv(env_file, override=False)
+            return
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(description="Run the full CTGAN experiment pipeline.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--dataset-id", required=True)
@@ -814,6 +877,83 @@ def main(argv: list[str] | None = None) -> int:
             poster_fast=args.poster_fast,
         )
     return 0
+
+
+def _maybe_upload_to_drive(
+    *,
+    run_dir: Path,
+    aggregate_metrics_path: Path,
+    dataset_id: str,
+    dataset_label: str,
+    encoding_method: str,
+    encoding_label: str,
+    progress_stream: Any,
+    progress_format: str,
+) -> None:
+    """Upload artifacts to Google Drive and write a row in the Results sheet.
+
+    Silently no-ops when CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID is not set,
+    so existing pipelines without Drive configuration are unaffected.
+    """
+    try:
+        from experiments.ctgan.orchestrator_staff.ctgan_drive import (
+            DriveConfig,
+            DriveClient,
+            upload_experiment_artifacts,
+            write_results_row,
+        )
+        from experiments.ctgan.orchestrator_staff.ctgan_sheets import SheetsConfig
+    except ImportError:
+        return
+
+    if not DriveConfig.is_configured():
+        return
+
+    _emit_progress(
+        stage="saving",
+        message="uploading artifacts to Google Drive",
+        progress_stream=progress_stream,
+        progress_format=progress_format,
+        dataset_id=dataset_id,
+        encoding_method=encoding_method,
+    )
+
+    try:
+        drive_config = DriveConfig.from_env()
+        drive_client = DriveClient(drive_config)
+
+        folder_url = upload_experiment_artifacts(
+            drive_client=drive_client,
+            run_dir=run_dir,
+            model_name="CTGAN",
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+        )
+
+        sheets_config = SheetsConfig.from_env()
+        write_results_row(
+            sheets_config=sheets_config,
+            aggregate_metrics_path=aggregate_metrics_path,
+            model_name="CTGAN",
+            dataset_label=dataset_label,
+            encoding_label=encoding_label,
+            folder_url=folder_url,
+            results_worksheet_name=os.getenv(
+                "CATREPBENCH_GDRIVE_RESULTS_WORKSHEET", "Results"
+            ),
+        )
+
+        _emit_progress(
+            stage="saving",
+            message=f"Drive upload complete: {folder_url}",
+            progress_stream=progress_stream,
+            progress_format=progress_format,
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Drive upload is best-effort — do not crash the experiment
+        print(f"[ctgan_drive] WARNING: Drive upload failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
