@@ -234,7 +234,22 @@ def run_once(
         claimed_jobs += 1
 
 
+def _load_dotenv() -> None:
+    """Load .env from the project root if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    # Walk up from this file to find .env
+    for parent in Path(__file__).resolve().parents:
+        env_file = parent / ".env"
+        if env_file.exists():
+            load_dotenv(env_file, override=False)
+            return
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(description="Run the CTGAN Google Sheets orchestrator.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--worksheet", required=True)
@@ -614,8 +629,8 @@ def _find_first_claimable_coord(
             dataset_label=dataset_label,
         )
 
-    for encoding_offset, _encoding_label in enumerate(snapshot.encoding_headers, start=2):
-        for dataset_offset, dataset_label in enumerate(snapshot.dataset_headers, start=2):
+    for dataset_offset, dataset_label in enumerate(snapshot.dataset_headers, start=2):
+        for encoding_offset, _encoding_label in enumerate(snapshot.encoding_headers, start=2):
             coord = f"{_column_name(dataset_offset)}{encoding_offset}"
             representative_coord = representative_coords.get(dataset_label)
             if representative_coord is not None and coord != representative_coord:
