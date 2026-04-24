@@ -285,6 +285,7 @@ def _compute_distribution_scores(
     test_df: pd.DataFrame,
     synth_df: pd.DataFrame,
     transformed_schema: TabularSchema,
+    original_schema: TabularSchema,
 ) -> dict[str, float]:
     dist_pipeline = DistributionEvaluationPipeline(
         metrics=[
@@ -294,10 +295,35 @@ def _compute_distribution_scores(
         ]
     )
     scores = dist_pipeline.evaluate(real=test_df, synth=synth_df, schema=transformed_schema).scores
+    unencoded_pipeline = DistributionEvaluationPipeline(
+        metrics=[
+            WassersteinDistanceMetric(
+                name="wasserstein_mean_unencoded",
+                include_discrete=False,
+            ),
+            MarginalKLDivergenceMetric(
+                name="marginal_kl_mean_unencoded",
+                include_categorical=False,
+            ),
+            CorrelationFrobeniusMetric(
+                name="corr_frobenius_unencoded",
+                include_categorical=False,
+                method="spearman",
+            ),
+        ]
+    )
+    unencoded_scores = unencoded_pipeline.evaluate(
+        real=test_df,
+        synth=synth_df,
+        schema=original_schema,
+    ).scores
     return {
         "wasserstein_mean": float(scores["wasserstein_mean"]),
         "marginal_kl_mean": float(scores["marginal_kl_mean"]),
         "corr_frobenius_transformed": float(scores["corr_frobenius"]),
+        "wasserstein_mean_unencoded": float(unencoded_scores["wasserstein_mean_unencoded"]),
+        "marginal_kl_mean_unencoded": float(unencoded_scores["marginal_kl_mean_unencoded"]),
+        "corr_frobenius_unencoded": float(unencoded_scores["corr_frobenius_unencoded"]),
     }
 
 
@@ -391,6 +417,7 @@ def _evaluate_prepared_split(
         test_df=split_data.test_transformed,
         synth_df=synth_df,
         transformed_schema=split_data.transformed_schema,
+        original_schema=schema,
     )
     corr_original_value, corr_original_status = _compute_original_space_corr(
         test_raw=split_data.test_raw,
