@@ -110,7 +110,7 @@ def tstr_catboost(
     def _pct_diff(real_val: float, synth_val: float) -> float:
         if real_val == 0:
             return float("inf")
-        return float(abs(real_val - synth_val) / abs(real_val) * 100.0)
+        return float(abs(real_val - synth_val) / abs(real_val))
 
     def _fit_and_eval_classification(train_df: pd.DataFrame) -> Dict[str, float]:
         train_pool = Pool(train_df[feature_cols], train_df[target_col], cat_features=cat_features)
