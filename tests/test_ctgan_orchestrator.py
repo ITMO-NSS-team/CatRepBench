@@ -249,6 +249,7 @@ def test_orchestrator_claims_runs_and_marks_done(monkeypatch, tmp_path):
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
 
     assert out.exit_code == 0
@@ -284,6 +285,7 @@ def test_orchestrator_updates_heartbeat_while_process_is_alive(monkeypatch, tmp_
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
         heartbeat_seconds=0,
     )
     assert out.exit_code == 0
@@ -300,6 +302,7 @@ def test_orchestrator_does_not_miss_buffered_progress_lines(monkeypatch, tmp_pat
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
 
     assert out.exit_code == 0
@@ -319,6 +322,7 @@ def test_orchestrator_keeps_latest_tuning_progress_note(monkeypatch, tmp_path):
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
 
     assert out.exit_code == 0
@@ -361,6 +365,7 @@ def test_orchestrator_classifies_out_of_memory_failures(monkeypatch, tmp_path):
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
 
     assert out.exit_code != 0
@@ -379,6 +384,7 @@ def test_orchestrator_classifies_signal_terminated_failures(monkeypatch, tmp_pat
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
 
     assert out.exit_code != 0
@@ -529,6 +535,7 @@ def test_orchestrator_skips_redundant_methods_after_first_done_for_no_category_d
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
 
     assert out.exit_code == 0
@@ -633,6 +640,7 @@ def test_orchestrator_does_not_run_later_method_while_no_category_candidate_is_i
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=True,
+        max_idle_polls=1,
     )
 
     assert out.exit_code == 0
@@ -684,6 +692,7 @@ def test_orchestrator_continue_on_failure_claims_next_job_and_keeps_going(monkey
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
         continue_on_failure=True,
     )
 
@@ -738,6 +747,7 @@ def test_orchestrator_continue_on_failure_survives_launch_errors(monkeypatch, tm
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
         continue_on_failure=True,
     )
 

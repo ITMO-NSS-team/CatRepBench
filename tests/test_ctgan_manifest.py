@@ -40,6 +40,33 @@ def test_load_manifest_resolves_dataset_label_without_source_prefix(tmp_path: Pa
     assert dataset.csv_path == tmp_path / "datasets" / "raw" / "openml_adult.csv"
 
 
+def test_load_manifest_sorts_datasets_by_raw_csv_size_smallest_first(tmp_path: Path):
+    datasets_root = tmp_path / "datasets" / "raw"
+    datasets_root.mkdir(parents=True)
+    (datasets_root / "openml_large.csv").write_text("x,y\n1,0\n2,0\n3,0\n", encoding="utf-8")
+    (datasets_root / "openml_small.csv").write_text("x,y\n1,0\n", encoding="utf-8")
+    (datasets_root / "openml_medium.csv").write_text("x,y\n1,0\n2,0\n", encoding="utf-8")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {"label": "large", "dataset_id": "openml_large", "target_col": "y", "id_col": None},
+                    {"label": "small", "dataset_id": "openml_small", "target_col": "y", "id_col": None},
+                    {"label": "medium", "dataset_id": "openml_medium", "target_col": "y", "id_col": None},
+                ],
+                "encodings": [{"label": "one-hot", "encoding_id": "one_hot_representation"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = load_ctgan_manifest(manifest_path, project_root=tmp_path)
+
+    assert [entry.label for entry in manifest.datasets] == ["small", "medium", "large"]
+
+
 def test_load_manifest_resolve_dataset_label_is_case_sensitive(tmp_path: Path):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(
