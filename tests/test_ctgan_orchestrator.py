@@ -6,7 +6,15 @@ import sys
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+
 import experiments.ctgan.orchestrator_staff.ctgan_orchestrator as orchestrator_mod
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    """Patch time.sleep so tests don't actually wait."""
+    monkeypatch.setattr(orchestrator_mod.time, "sleep", lambda _: None)
 
 
 def write_orchestrator_manifest(tmp_path):
@@ -90,7 +98,9 @@ class FakeSheetsClient:
 
     @classmethod
     def ambiguous_claim(cls):
-        return cls(
+        # reread returns a foreign owner once, then falls through to _cell_values
+        # (which will contain our own claim after we wrote it).
+        instance = cls(
             reread_value=_payload(
                 "in-progress",
                 run_id="someone-else",
@@ -100,6 +110,15 @@ class FakeSheetsClient:
                 heartbeat_at="2026-04-02T00:00:00Z",
             )
         )
+        instance._reread_uses_remaining = 1
+        return instance
+
+    def read_cell(self, coord):
+        if self._reread_value is not None and self._raw_write_calls:
+            if getattr(self, "_reread_uses_remaining", None):
+                self._reread_uses_remaining -= 1
+                return self._reread_value
+        return self._cell_values.get(coord, " ")
 
     def read_matrix(self):
         return {
@@ -107,11 +126,6 @@ class FakeSheetsClient:
             "encoding_headers": list(self._matrix["encoding_headers"]),
             "cell_values": dict(self._cell_values),
         }
-
-    def read_cell(self, coord):
-        if self._reread_value is not None and self._raw_write_calls:
-            return self._reread_value
-        return self._cell_values.get(coord, " ")
 
     def write_cell(self, coord, payload):
         if isinstance(payload, str):
@@ -241,16 +255,23 @@ def test_orchestrator_claims_runs_and_marks_done(monkeypatch, tmp_path):
     assert fake_sheets.last_payload.status == "done"
 
 
-def test_orchestrator_exits_non_zero_on_ambiguous_claim(monkeypatch, tmp_path):
+def test_orchestrator_retries_on_ambiguous_claim(monkeypatch, tmp_path):
+    # When _ensure_lease_owner fails (another orchestrator stole the cell),
+    # run_once should retry rather than immediately exit with non-zero.
+    # After the retry the cell is taken (in _cell_values) so claim_coord
+    # becomes None and the orchestrator exits with 0 (no failures, no jobs).
     manifest_path = write_orchestrator_manifest(tmp_path)
     fake_sheets = FakeSheetsClient.ambiguous_claim()
+
     out = orchestrator_mod.run_once(
         sheets=fake_sheets,
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
     )
-    assert out.exit_code != 0
+    # No jobs were successfully completed, but no failures either — exit 0.
+    assert out.exit_code == 0
+    assert out.claimed_jobs == 0
 
 
 def test_orchestrator_updates_heartbeat_while_process_is_alive(monkeypatch, tmp_path):
@@ -723,6 +744,70 @@ def test_orchestrator_continue_on_failure_survives_launch_errors(monkeypatch, tm
     assert attempts["count"] == 2
     assert any(payload.status == "failed" for payload in fake_sheets.write_calls)
     assert any(payload.status == "done" for payload in fake_sheets.write_calls)
+
+
+def test_orchestrator_claim_order_is_dataset_first(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "datasets": [
+                    {
+                        "label": "adult",
+                        "dataset_id": "openml_adult",
+                        "target_col": "class",
+                        "id_col": None,
+                    },
+                    {
+                        "label": "bank-marketing",
+                        "dataset_id": "openml_bank-marketing",
+                        "target_col": "class",
+                        "id_col": None,
+                    },
+                ],
+                "encodings": [
+                    {
+                        "label": "one-hot",
+                        "encoding_id": "one_hot_representation",
+                    },
+                    {
+                        "label": "ordinal",
+                        "encoding_id": "ordinal_representation",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_sheets = FakeSheetsClient(
+        matrix={
+            "dataset_headers": ["adult", "bank-marketing"],
+            "encoding_headers": ["one-hot", "ordinal"],
+            "cell_values": {
+                "B2": _payload(
+                    "done",
+                    run_id="r1",
+                    owner="host:1:0",
+                    stage="done",
+                    started_at="2026-04-02T00:00:00Z",
+                    heartbeat_at="2026-04-02T00:10:00Z",
+                    finished_at="2026-04-02T00:11:00Z",
+                ),
+                "C2": " ",
+                "B3": " ",
+                "C3": " ",
+            },
+        }
+    )
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=True,
+    )
+
+    assert out.claimed_coord == "B3"
 
 
 def test_infer_project_root_finds_repo_root_for_nested_manifest_path(tmp_path):

@@ -419,9 +419,9 @@ def upload_experiment_artifacts(
         # plots
         ".png", ".svg", ".pdf",
         # checkpoints
-        ".pt", ".ckpt", ".safetensors", ".pth",
+        ".pt", ".ckpt", ".safetensors", ".pth", ".pkl",
         # results / metrics
-        ".json",
+        ".json", ".csv",
     )
 
     n_uploaded = drive_client.upload_directory(
@@ -586,6 +586,7 @@ def _guess_mime_type(path: Path) -> str:
         ".png": "image/png",
         ".svg": "image/svg+xml",
         ".pdf": "application/pdf",
+        ".pkl": "application/octet-stream",
         ".pt": "application/octet-stream",
         ".pth": "application/octet-stream",
         ".ckpt": "application/octet-stream",

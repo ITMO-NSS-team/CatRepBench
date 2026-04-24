@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import queue
+import random
 import socket
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from genbench.data.schema import TabularSchema
 _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
 _HEARTBEAT_FAILURE_TIMEOUT_SECONDS = 15 * 60
 _FAILURE_OUTPUT_TAIL_LINES = 8
+_IDLE_POLL_INTERVAL_SECONDS = 60  # pause between sheet polls when no claimable cell found
 _EOF = object()
 _STREAM_QUEUES: dict[int, queue.Queue[str | object]] = {}
 
@@ -122,6 +124,12 @@ def run_once(
             now=datetime.now(timezone.utc),
         )
         if claim_coord is None:
+            if claimed_jobs == 0:
+                # No work found yet — all cells are either in-progress or done.
+                # Wait and retry instead of exiting immediately.
+                time.sleep(_IDLE_POLL_INTERVAL_SECONDS)
+                continue
+            # We already did some work and now there's nothing left — done.
             return OrchestratorRunResult(
                 exit_code=1 if had_failures else 0,
                 claimed_coord=first_claimed_coord,
@@ -164,6 +172,21 @@ def run_once(
                 claimed_jobs=0,
             )
 
+        # Jitter before claiming to reduce the chance of a simultaneous write
+        # from another orchestrator that read the same free cell.
+        time.sleep(random.uniform(0, 3))
+
+        # Re-read the cell to check it's still free after the jitter window.
+        snapshot = _load_snapshot(sheets.read_matrix(), manifest=manifest)
+        rechecked = _find_first_claimable_coord(
+            snapshot=snapshot,
+            manifest=manifest,
+            now=datetime.now(timezone.utc),
+        )
+        if rechecked != claim_coord:
+            # Cell was taken during our jitter — retry from the top.
+            continue
+
         run_id = str(uuid.uuid4())
         claimed_at = _utcnow()
         claim_payload = _build_payload(
@@ -179,12 +202,9 @@ def run_once(
         sheets.write_cell(claim_coord, claim_payload)
 
         if not _ensure_lease_owner(sheets=sheets, coord=claim_coord, run_id=run_id, owner=owner):
-            return OrchestratorRunResult(
-                exit_code=1,
-                claimed_coord=claim_coord,
-                runner_argv=runner_argv,
-                claimed_jobs=claimed_jobs,
-            )
+            # Lost the race — another orchestrator claimed this cell first. Retry.
+            time.sleep(_IDLE_POLL_INTERVAL_SECONDS)
+            continue
 
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"

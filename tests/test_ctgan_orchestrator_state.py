@@ -72,7 +72,10 @@ def test_skipped_cell_is_terminal_and_not_claimable():
     assert payload.is_claimable(now=now) is False
 
 
-def test_find_first_claimable_cell_scans_left_to_right_then_top_to_bottom():
+def test_find_first_claimable_cell_scans_dataset_first_then_encoding():
+    # Layout: rows = encodings (B=one-hot, C=ordinal), cols = datasets (2=adult, 3=bank-marketing)
+    # New order: dataset outer (left-to-right), encoding inner (top-to-bottom).
+    # B2 (adult/one-hot) is done → next candidate is B3 (adult/ordinal), not C2 (bank-marketing/one-hot).
     coord = find_first_claimable_cell(
         dataset_headers=["adult", "bank-marketing"],
         encoding_headers=["one-hot", "ordinal"],
@@ -85,7 +88,7 @@ def test_find_first_claimable_cell_scans_left_to_right_then_top_to_bottom():
             "C3": " ",
         },
     )
-    assert coord == "C2"
+    assert coord == "B3"
 
 
 def test_unknown_sheet_header_is_rejected_against_manifest():
