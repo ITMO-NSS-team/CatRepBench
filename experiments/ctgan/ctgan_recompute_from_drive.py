@@ -295,6 +295,109 @@ class LocalDriveReader:
     def folder_web_url(self, folder_id: str) -> str:
         return f"https://drive.google.com/drive/folders/{folder_id}"
 
+    def create_folder(self, name: str, parent_id: str) -> str:
+        """Create a subfolder and return its ID."""
+        metadata = {
+            "name": name,
+            "mimeType": _FOLDER_MIME_TYPE,
+            "parents": [parent_id],
+        }
+
+        def _create() -> str:
+            result = (
+                self._service.files()
+                .create(body=metadata, fields="id", supportsAllDrives=True)
+                .execute()
+            )
+            return str(result["id"])
+
+        return _retry(_create)
+
+    def ensure_folder_path(self, *path_parts: str, root_id: str | None = None) -> str:
+        """Find or create nested subfolders and return the leaf folder ID."""
+        current_parent = root_id or self.config.results_folder_id
+        for part in path_parts:
+            found = self.find_folder(part, current_parent)
+            if found is None:
+                found = self.create_folder(part, current_parent)
+            current_parent = found
+        return current_parent
+
+    def upload_file(self, local_path: Path, parent_id: str, *, overwrite: bool = True) -> str:
+        """Upload a local file to Drive, optionally overwriting an existing file with the same name.
+
+        Returns the Drive file ID.
+        """
+        try:
+            from googleapiclient.http import MediaFileUpload
+        except ImportError as exc:
+            raise RuntimeError("google-api-python-client is required for Drive uploads.") from exc
+
+        name = local_path.name
+
+        # Check if a file with this name already exists in the parent folder
+        existing_id: str | None = None
+        if overwrite:
+            query = (
+                f"name = {json.dumps(name)} "
+                f"and '{parent_id}' in parents "
+                f"and mimeType != '{_FOLDER_MIME_TYPE}' "
+                f"and trashed = false"
+            )
+
+            def _search() -> list[dict[str, Any]]:
+                return (
+                    self._service.files()
+                    .list(
+                        q=query,
+                        fields="files(id)",
+                        spaces="drive",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
+                    .get("files", [])
+                )
+
+            existing = _retry(_search)
+            if existing:
+                existing_id = str(existing[0]["id"])
+
+        media = MediaFileUpload(str(local_path), resumable=False)
+
+        if existing_id is not None:
+            def _update() -> str:
+                result = (
+                    self._service.files()
+                    .update(
+                        fileId=existing_id,
+                        media_body=media,
+                        fields="id",
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
+                return str(result["id"])
+
+            return _retry(_update)
+        else:
+            metadata = {"name": name, "parents": [parent_id]}
+
+            def _insert() -> str:
+                result = (
+                    self._service.files()
+                    .create(
+                        body=metadata,
+                        media_body=media,
+                        fields="id",
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
+                return str(result["id"])
+
+            return _retry(_insert)
+
 
 @dataclass(frozen=True)
 class RecomputedPair:
@@ -540,6 +643,44 @@ class IncrementalResultsWorksheetWriter:
     def append_row(self, row: list[str]) -> None:
         self._rows.append(row)
         _update_worksheet_values(self._worksheet, [FULL_RESULTS_HEADERS, *self._rows])
+
+
+def _upload_recomputed_jsons(
+    *,
+    drive_client: Any,
+    run_dir: Path,
+    folder_id: str,
+) -> None:
+    """Upload recomputed JSON result files back to the same Drive folder.
+
+    Uploads metrics/aggregate.json, crossval/per_fold/fold_*.json, and
+    run_summary.json — overwriting the old versions on Drive so the Drive
+    folder stays in sync with the recomputed results.
+    """
+    json_files = [
+        run_dir / "metrics" / "aggregate.json",
+        run_dir / "run_summary.json",
+    ]
+    per_fold_dir = run_dir / "crossval" / "per_fold"
+    if per_fold_dir.exists():
+        json_files.extend(sorted(per_fold_dir.glob("fold_*.json")))
+
+    uploaded = 0
+    for local_path in json_files:
+        if not local_path.exists():
+            continue
+        # Relative path within the run_dir → mirrors the Drive subfolder structure
+        relative = local_path.relative_to(run_dir)
+        # Ensure the subfolder exists on Drive
+        parts = list(relative.parts)
+        if len(parts) > 1:
+            parent_id = drive_client.ensure_folder_path(*parts[:-1], root_id=folder_id)
+        else:
+            parent_id = folder_id
+        drive_client.upload_file(local_path, parent_id, overwrite=True)
+        uploaded += 1
+
+    print(f"[ctgan_recompute_from_drive] uploaded {uploaded} recomputed JSON(s) back to Drive")
 
 
 def _compute_distribution_scores(
@@ -981,6 +1122,14 @@ def _recompute_pair_from_drive(
     )
     aggregate_path = run_dir / "metrics" / "aggregate.json"
     full_mod._save_json(aggregate_path, aggregate_payload)
+
+    # Upload recomputed JSON results back to the same Drive folder,
+    # overwriting the old aggregate.json and per-fold JSONs.
+    _upload_recomputed_jsons(
+        drive_client=drive_client,
+        run_dir=run_dir,
+        folder_id=folder_id,
+    )
 
     folder_url = drive_client.folder_web_url(folder_id)
     local_summary = {
