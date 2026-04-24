@@ -48,6 +48,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -61,6 +62,24 @@ _DRIVE_SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets",
 )
 
+_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+
+FULL_RESULTS_HEADERS = [
+    "Model",
+    "Dataset",
+    "Categorical representation",
+    "Mean WD",
+    "Std WD",
+    "Mean KL",
+    "Std KL",
+    "Mean Corr dist",
+    "Std Corr dist",
+    "Mean Utility",
+    "Std Utility",
+    "Task Type",
+    "Drive folder URL",
+]
+
 
 def _retry(func: Callable[[], Any], sleep: Callable[[float], None] = time.sleep) -> Any:
     last_error: Exception | None = None
@@ -73,6 +92,16 @@ def _retry(func: Callable[[], Any], sleep: Callable[[float], None] = time.sleep)
     if last_error is not None:
         raise last_error
     raise RuntimeError("_retry exhausted without executing the function")
+
+
+@dataclass(frozen=True)
+class DriveFileRecord:
+    file_id: str
+    name: str
+    mime_type: str
+    modified_time: str
+    relative_path: str
+    parent_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -226,12 +255,55 @@ class DriveClient:
     # Folder helpers
     # ------------------------------------------------------------------
 
+    def find_folder(self, name: str, parent_id: str) -> str | None:
+        """Return an existing folder ID without creating anything."""
+        query = (
+            f"name = {json.dumps(name)} "
+            f"and '{parent_id}' in parents "
+            f"and mimeType = '{_FOLDER_MIME_TYPE}' "
+            f"and trashed = false"
+        )
+
+        def _search() -> list[dict[str, Any]]:
+            return (
+                self._service.files()
+                .list(
+                    q=query,
+                    fields="files(id,name,modifiedTime)",
+                    spaces="drive",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
+                )
+                .execute()
+                .get("files", [])
+            )
+
+        results = _retry(_search)
+        if not results:
+            return None
+        latest = sorted(
+            results,
+            key=lambda item: _parse_drive_modified_time(str(item.get("modifiedTime", ""))),
+            reverse=True,
+        )[0]
+        return str(latest["id"])
+
+    def find_folder_path(self, *path_parts: str, root_id: str | None = None) -> str | None:
+        """Return the leaf folder for an existing path, or None when any part is absent."""
+        current_parent = root_id or self.config.results_folder_id
+        for part in path_parts:
+            found = self.find_folder(part, current_parent)
+            if found is None:
+                return None
+            current_parent = found
+        return current_parent
+
     def _find_or_create_folder(self, name: str, parent_id: str) -> str:
         """Return folder ID, creating it if it doesn't exist."""
         query = (
             f"name = {json.dumps(name)} "
             f"and '{parent_id}' in parents "
-            f"and mimeType = 'application/vnd.google-apps.folder' "
+            f"and mimeType = '{_FOLDER_MIME_TYPE}' "
             f"and trashed = false"
         )
 
@@ -255,7 +327,7 @@ class DriveClient:
 
         metadata: dict[str, Any] = {
             "name": name,
-            "mimeType": "application/vnd.google-apps.folder",
+            "mimeType": _FOLDER_MIME_TYPE,
             "parents": [parent_id],
         }
 
@@ -312,6 +384,85 @@ class DriveClient:
 
         result = _retry(_upload)
         return str(result["id"])
+
+    def download_file(self, file_id: str, destination: Path) -> None:
+        """Download one Drive file to *destination*, replacing any existing file."""
+        try:
+            from googleapiclient.http import MediaIoBaseDownload
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-api-python-client is required for Drive downloads."
+            ) from exc
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        def _download() -> None:
+            request = self._service.files().get_media(fileId=file_id, supportsAllDrives=True)
+            with destination.open("wb") as handle:
+                downloader = MediaIoBaseDownload(handle, request)
+                done = False
+                while not done:
+                    _status, done = downloader.next_chunk()
+
+        _retry(_download)
+
+    def list_files_recursive(self, folder_id: str) -> list[DriveFileRecord]:
+        """List non-folder files below *folder_id* with their relative paths."""
+        records: list[DriveFileRecord] = []
+        self._list_files_recursive_into(folder_id=folder_id, relative_prefix="", records=records)
+        return records
+
+    def _list_files_recursive_into(
+        self,
+        *,
+        folder_id: str,
+        relative_prefix: str,
+        records: list[DriveFileRecord],
+    ) -> None:
+        page_token: str | None = None
+        while True:
+            query = f"'{folder_id}' in parents and trashed = false"
+
+            def _list_page() -> dict[str, Any]:
+                return (
+                    self._service.files()
+                    .list(
+                        q=query,
+                        fields="nextPageToken,files(id,name,mimeType,modifiedTime,parents)",
+                        pageToken=page_token,
+                        spaces="drive",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
+                )
+
+            page = _retry(_list_page)
+            for item in page.get("files", []):
+                name = str(item["name"])
+                mime_type = str(item.get("mimeType", ""))
+                item_id = str(item["id"])
+                relative_path = f"{relative_prefix}/{name}" if relative_prefix else name
+                if mime_type == _FOLDER_MIME_TYPE:
+                    self._list_files_recursive_into(
+                        folder_id=item_id,
+                        relative_prefix=relative_path,
+                        records=records,
+                    )
+                    continue
+                records.append(
+                    DriveFileRecord(
+                        file_id=item_id,
+                        name=name,
+                        mime_type=mime_type,
+                        modified_time=str(item.get("modifiedTime", "")),
+                        relative_path=relative_path,
+                        parent_id=folder_id,
+                    )
+                )
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
 
     def folder_web_url(self, folder_id: str) -> str:
         """Return the browser-facing URL for a Drive folder."""
@@ -436,6 +587,217 @@ def upload_experiment_artifacts(
     return drive_client.folder_web_url(leaf_folder_id)
 
 
+def _parse_drive_modified_time(value: str) -> datetime:
+    if not value:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def sort_drive_file_records_newest_first(records: list[DriveFileRecord]) -> list[DriveFileRecord]:
+    return sorted(
+        records,
+        key=lambda record: _parse_drive_modified_time(record.modified_time),
+        reverse=True,
+    )
+
+
+def drive_records_by_relative_path(records: list[DriveFileRecord]) -> dict[str, list[DriveFileRecord]]:
+    grouped: dict[str, list[DriveFileRecord]] = {}
+    for record in records:
+        grouped.setdefault(record.relative_path, []).append(record)
+    return {
+        relative_path: sort_drive_file_records_newest_first(path_records)
+        for relative_path, path_records in grouped.items()
+    }
+
+
+def download_first_valid_drive_file(
+    *,
+    drive_client: Any,
+    candidates: list[DriveFileRecord],
+    destination: Path,
+    validator: Callable[[Path], bool],
+) -> DriveFileRecord:
+    """Download the newest candidate that passes *validator*.
+
+    If the freshest clone is corrupt or unreadable, the next newest candidate is tried.
+    """
+    failures: list[str] = []
+    for record in sort_drive_file_records_newest_first(candidates):
+        try:
+            if destination.exists():
+                destination.unlink()
+            drive_client.download_file(record.file_id, destination)
+            if validator(destination):
+                return record
+            failures.append(f"{record.file_id}: validator rejected file")
+        except Exception as exc:  # noqa: BLE001 - corrupt Drive clones are expected here
+            failures.append(f"{record.file_id}: {exc}")
+    if destination.exists():
+        destination.unlink()
+    raise FileNotFoundError(
+        "No valid Drive file found for "
+        f"{candidates[0].relative_path if candidates else '<empty candidates>'}: "
+        + "; ".join(failures)
+    )
+
+
+def _metric_value(aggregate: dict[str, Any], metric_name: str, field: str) -> Any:
+    entry = aggregate.get("distribution", {}).get(metric_name, {})
+    if isinstance(entry, dict):
+        return entry.get(field)
+    return None
+
+
+def _tstr_value(aggregate: dict[str, Any], metric_name: str, field: str) -> Any:
+    entry = aggregate.get("tstr", {}).get("metrics", {}).get(metric_name, {})
+    if isinstance(entry, dict):
+        return entry.get(field)
+    return None
+
+
+def _utility_gap_value(aggregate: dict[str, Any], field: str) -> Any:
+    tstr = aggregate.get("tstr", {})
+    task_type = tstr.get("task_type") if isinstance(tstr, dict) else None
+    if task_type == "regression":
+        return _tstr_value(aggregate, "r2_pct_diff", field)
+    if task_type == "classification":
+        return _tstr_value(aggregate, "f1_weighted_pct_diff", field)
+    return _tstr_value(aggregate, "r2_pct_diff", field) or _tstr_value(
+        aggregate, "f1_weighted_pct_diff", field
+    )
+
+
+def _format_sheet_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(round(float(value), 6))
+    return str(value)
+
+
+def build_results_sheet_row(
+    *,
+    model_name: str,
+    dataset_label: str,
+    dataset_id: str,
+    encoding_label: str,
+    encoding_id: str,
+    aggregate: dict[str, Any],
+    folder_url: str,
+) -> list[str]:
+    # WD, KL, Corr dist are taken from the *unencoded* metrics so that values
+    # are comparable across encodings regardless of the encoding dimensionality.
+    task_type = aggregate.get("tstr", {}).get("task_type") or ""
+    row = [
+        model_name,
+        dataset_label,
+        encoding_label,
+        _metric_value(aggregate, "wasserstein_mean_unencoded", "mean"),
+        _metric_value(aggregate, "wasserstein_mean_unencoded", "std"),
+        _metric_value(aggregate, "marginal_kl_mean_unencoded", "mean"),
+        _metric_value(aggregate, "marginal_kl_mean_unencoded", "std"),
+        _metric_value(aggregate, "corr_frobenius_unencoded", "mean"),
+        _metric_value(aggregate, "corr_frobenius_unencoded", "std"),
+        _utility_gap_value(aggregate, "mean"),
+        _utility_gap_value(aggregate, "std"),
+        task_type,
+        folder_url,
+    ]
+    return [_format_sheet_value(value) for value in row]
+
+
+def _update_worksheet_values(worksheet: Any, values: list[list[str]]) -> None:
+    try:
+        worksheet.update(values=values, range_name="A1")
+    except TypeError:
+        try:
+            worksheet.update("A1", values)
+        except TypeError:
+            worksheet.update(values)
+
+
+def refresh_full_results_worksheet(
+    *,
+    spreadsheet: Any,
+    worksheet_name: str,
+    rows: list[list[str]],
+    archive_existing: bool,
+    now: datetime | None = None,
+) -> Any:
+    if archive_existing:
+        timestamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        try:
+            existing = spreadsheet.worksheet(worksheet_name)
+        except Exception:  # noqa: BLE001 - absent sheet is fine when creating a fresh one
+            existing = None
+        if existing is not None:
+            existing.update_title(f"{worksheet_name}_legacy_{timestamp}")
+
+    worksheet = spreadsheet.add_worksheet(
+        title=worksheet_name,
+        rows=max(len(rows) + 1, 1000),
+        cols=len(FULL_RESULTS_HEADERS),
+    )
+    _update_worksheet_values(worksheet, [FULL_RESULTS_HEADERS, *rows])
+    if hasattr(worksheet, "freeze"):
+        worksheet.freeze(rows=1)
+    return worksheet
+
+
+def _build_spreadsheet_with_drive_scopes(config: Any) -> Any:
+    try:
+        import gspread
+        from google.oauth2 import service_account
+    except ImportError as exc:
+        raise RuntimeError(
+            "gspread and google-auth are required. Install requirements.txt first."
+        ) from exc
+
+    if config.service_account_info is not None:
+        credentials = service_account.Credentials.from_service_account_info(
+            info=config.service_account_info,
+            scopes=list(_DRIVE_SCOPES),
+        )
+    elif config.service_account_path is not None:
+        credentials = service_account.Credentials.from_service_account_file(
+            filename=str(config.service_account_path),
+            scopes=list(_DRIVE_SCOPES),
+        )
+    else:
+        raise ValueError("SheetsConfig must define service_account_path or service_account_info")
+
+    from experiments.ctgan.orchestrator_staff.ctgan_sheets import retry_call
+
+    client = gspread.authorize(credentials)
+    return retry_call(lambda: client.open_by_key(config.spreadsheet_id))
+
+
+def refresh_full_results_worksheet_from_config(
+    *,
+    sheets_config: Any,
+    worksheet_name: str,
+    rows: list[list[str]],
+    archive_existing: bool,
+) -> None:
+    spreadsheet = _build_spreadsheet_with_drive_scopes(sheets_config)
+    refresh_full_results_worksheet(
+        spreadsheet=spreadsheet,
+        worksheet_name=worksheet_name,
+        rows=rows,
+        archive_existing=archive_existing,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Results sheet writer
 # ---------------------------------------------------------------------------
@@ -447,26 +809,16 @@ def write_results_row(
     aggregate_metrics_path: Path,
     model_name: str,
     dataset_label: str,
+    dataset_id: str = "",
     encoding_label: str,
+    encoding_id: str = "",
     folder_url: str,
     results_worksheet_name: str = "Results",
 ) -> None:
     """Append a metrics row to the *results_worksheet_name* sheet.
 
-    Expected sheet layout (from the screenshot):
-        A: Model
-        B: Dataset
-        C: Categorical representation
-        D: Mean WD – Mean
-        E: Mean WD – Std
-        F: Mean KL – Mean
-        G: Mean KL – Std
-        H: Corr dist – Mean
-        I: Corr dist – Std
-        J: Ссылка на материалы
-
-    The function finds the first empty row (by checking column A) and
-    writes to that row.
+    The function writes the full metrics schema used by recomputed Results.
+    It finds the first empty row by checking column A.
     """
     from experiments.ctgan.orchestrator_staff.ctgan_sheets import SheetsClient, SheetsConfig
     from dataclasses import replace
@@ -483,54 +835,52 @@ def write_results_row(
     with aggregate_metrics_path.open("r", encoding="utf-8") as f:
         aggregate = json.load(f)
 
-    dist = aggregate.get("distribution", {})
-
-    def _mean_std(key: str) -> tuple[str, str]:
-        entry = dist.get(key, {})
-        if isinstance(entry, dict):
-            return str(round(entry.get("mean", ""), 6)), str(round(entry.get("std", ""), 6))
-        return "", ""
-
-    wd_mean, wd_std = _mean_std("wasserstein_mean")
-    kl_mean, kl_std = _mean_std("marginal_kl_mean")
-    # Use transformed corr_frobenius as "Corr dist"
-    corr_mean, corr_std = _mean_std("corr_frobenius_transformed")
-
-    row_values = [
-        model_name,
-        dataset_label,
-        encoding_label,
-        wd_mean,
-        wd_std,
-        kl_mean,
-        kl_std,
-        corr_mean,
-        corr_std,
-        folder_url,
-    ]
+    row_values = build_results_sheet_row(
+        model_name=model_name,
+        dataset_label=dataset_label,
+        dataset_id=dataset_id,
+        encoding_label=encoding_label,
+        encoding_id=encoding_id,
+        aggregate=aggregate,
+        folder_url=folder_url,
+    )
 
     matrix = results_client.read_matrix()
-    # Sheet has a 2-row merged header (rows 1-2), data starts at row 3.
-    # Find the first empty row at or after row 3 (index 2).
-    first_empty_row = max(len(matrix) + 1, 3)  # default: append after all existing rows
-    for row_idx, row in enumerate(matrix):
-        if row_idx < 2:
-            continue  # skip the two header rows
-        cell_a = row[0] if row else ""
-        if not cell_a.strip():
-            first_empty_row = row_idx + 1  # 1-based sheet row
-            break
+    has_full_header = bool(matrix and matrix[0][: len(FULL_RESULTS_HEADERS)] == FULL_RESULTS_HEADERS)
+    if not has_full_header:
+        for col_index, value in enumerate(FULL_RESULTS_HEADERS, start=1):
+            results_client.write_cell(f"{_column_name(col_index)}1", value)
 
-    # Write each cell individually (SheetsClient.write_cell uses A1 notation)
-    col_letters = list("ABCDEFGHIJ")
-    for col_idx, (col_letter, value) in enumerate(zip(col_letters, row_values)):
-        coord = f"{col_letter}{first_empty_row}"
+    if not has_full_header:
+        first_empty_row = 2
+    else:
+        first_empty_row = max(len(matrix) + 1, 2)
+        for row_idx, row in enumerate(matrix):
+            if row_idx < 1:
+                continue
+            cell_a = row[0] if row else ""
+            if not cell_a.strip():
+                first_empty_row = row_idx + 1  # 1-based sheet row
+                break
+
+    for col_idx, value in enumerate(row_values, start=1):
+        coord = f"{_column_name(col_idx)}{first_empty_row}"
         results_client.write_cell(coord, value)
 
     print(
         f"[ctgan_drive] Wrote results row to sheet '{results_worksheet_name}' "
         f"at row {first_empty_row}."
     )
+
+
+def _column_name(index: int) -> str:
+    if index < 1:
+        raise ValueError("Column index must be 1-based.")
+    letters = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
 
 
 # ---------------------------------------------------------------------------
