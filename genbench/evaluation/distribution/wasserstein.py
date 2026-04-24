@@ -10,24 +10,31 @@ from sklearn.preprocessing import StandardScaler
 
 from genbench.data.schema import TabularSchema
 from genbench.evaluation.base import BaseMetric
-from genbench.evaluation.distribution._common import ensure_feature_view
+from genbench.evaluation.distribution._common import ensure_columns_view, selected_feature_columns
 
 
 @dataclass
 class WassersteinDistanceMetric(BaseMetric):
     """
-    Mean 1D Wasserstein distance over numeric features in normalized space.
+    Mean 1D Wasserstein distance over selected numeric features in normalized space.
     """
 
     name: str = "wasserstein_mean"
+    include_continuous: bool = True
+    include_discrete: bool = True
 
     def compute(self, real: pd.DataFrame, synth: pd.DataFrame, schema: TabularSchema) -> float:
-        cols = list(schema.continuous_cols) + list(schema.discrete_cols)
+        cols = selected_feature_columns(
+            schema,
+            include_continuous=self.include_continuous,
+            include_discrete=self.include_discrete,
+            include_categorical=False,
+        )
         if not cols:
-            raise ValueError("No numeric columns (continuous+discrete) available for Wasserstein distance.")
+            return 0.0
 
-        real_num = ensure_feature_view(real, schema)[cols].astype(float)
-        synth_num = ensure_feature_view(synth, schema)[cols].astype(float)
+        real_num = ensure_columns_view(real, cols).astype(float)
+        synth_num = ensure_columns_view(synth, cols).astype(float)
 
         scaler = StandardScaler()
         real_scaled = pd.DataFrame(scaler.fit_transform(real_num), columns=cols)

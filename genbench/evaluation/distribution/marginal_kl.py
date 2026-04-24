@@ -9,7 +9,7 @@ from scipy.stats import entropy
 
 from genbench.data.schema import TabularSchema
 from genbench.evaluation.base import BaseMetric
-from genbench.evaluation.distribution._common import ensure_feature_view
+from genbench.evaluation.distribution._common import ensure_columns_view, selected_feature_columns
 
 
 def _hist_prob(values: np.ndarray, bins: np.ndarray, eps: float) -> np.ndarray:
@@ -22,19 +22,28 @@ def _hist_prob(values: np.ndarray, bins: np.ndarray, eps: float) -> np.ndarray:
 @dataclass
 class MarginalKLDivergenceMetric(BaseMetric):
     """
-    Mean marginal KL divergence across all feature columns.
+    Mean marginal KL divergence across selected feature columns.
     """
 
     name: str = "marginal_kl_mean"
     n_bins: int = 20
     eps: float = 1e-8
+    include_continuous: bool = True
+    include_discrete: bool = True
+    include_categorical: bool = True
 
     def compute(self, real: pd.DataFrame, synth: pd.DataFrame, schema: TabularSchema) -> float:
-        real_feat = ensure_feature_view(real, schema)
-        synth_feat = ensure_feature_view(synth, schema)
+        cols = selected_feature_columns(
+            schema,
+            include_continuous=self.include_continuous,
+            include_discrete=self.include_discrete,
+            include_categorical=self.include_categorical,
+        )
+        real_feat = ensure_columns_view(real, cols)
+        synth_feat = ensure_columns_view(synth, cols)
 
         kl_values: List[float] = []
-        for c in schema.feature_cols:
+        for c in cols:
             r = real_feat[c]
             s = synth_feat[c]
 
