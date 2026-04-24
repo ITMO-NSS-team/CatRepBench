@@ -50,16 +50,100 @@ def test_wasserstein_non_negative(sample_data):
     assert value >= 0.0
 
 
+def test_wasserstein_can_be_limited_to_continuous_columns():
+    real = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0],
+            "disc": [0, 0, 1, 1],
+        }
+    )
+    synth = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0],
+            "disc": [100, 100, 101, 101],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=["x"],
+        discrete_cols=["disc"],
+        categorical_cols=[],
+    )
+
+    value = WassersteinDistanceMetric(include_discrete=False).compute(real, synth, schema)
+
+    assert value == 0.0
+
+
 def test_marginal_kl_mean(sample_data):
     real, synth, schema = sample_data
     value = compute_marginal_kl_mean(real, synth, schema, n_bins=10)
     assert value >= 0.0
 
 
+def test_marginal_kl_can_exclude_categorical_columns():
+    real = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0],
+            "disc": [0, 0, 1, 1],
+            "cat": ["a", "a", "a", "a"],
+        }
+    )
+    synth = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0],
+            "disc": [0, 0, 1, 1],
+            "cat": ["b", "b", "b", "b"],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=["x"],
+        discrete_cols=["disc"],
+        categorical_cols=["cat"],
+    )
+
+    value = MarginalKLDivergenceMetric(include_categorical=False).compute(real, synth, schema)
+
+    assert value == 0.0
+
+
 def test_corr_frobenius(sample_data):
     real, synth, schema = sample_data
     value = compute_corr_frobenius(real, synth, schema)
     assert value >= 0.0
+
+
+def test_corr_frobenius_can_use_spearman_on_numeric_feature_subset():
+    real = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "disc": [0, 0, 1, 1],
+            "cat": ["a", "a", "b", "b"],
+        }
+    )
+    synth = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "disc": [1, 1, 0, 0],
+            "cat": ["a", "b", "a", "b"],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=["x"],
+        discrete_cols=["disc"],
+        categorical_cols=["cat"],
+    )
+
+    value = CorrelationFrobeniusMetric(
+        include_categorical=False,
+        method="spearman",
+    ).compute(real, synth, schema)
+
+    expected = np.linalg.norm(
+        real[["x", "disc"]].corr(method="spearman").to_numpy()
+        - synth[["x", "disc"]].corr(method="spearman").to_numpy(),
+        ord="fro",
+    )
+    assert np.isclose(value, expected)
 
 
 def test_distribution_pipeline(sample_data):

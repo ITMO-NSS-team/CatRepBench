@@ -87,6 +87,7 @@ class HashRepresentation:
                 cols=[c],
                 n_components=self.n_components,
                 return_df=True,
+                max_process=1,
             )
 
             col_df = df[[c]].copy()

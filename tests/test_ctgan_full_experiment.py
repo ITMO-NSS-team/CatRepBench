@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 import experiments.ctgan.ctgan_full_experiment as full_mod
+from genbench.data.schema import TabularSchema
 
 
 def progress_stages(progress_stream: StringIO) -> list[str]:
@@ -244,6 +245,49 @@ def fake_run_runtime_estimate(
     return SimpleNamespace(output_dir=output_dir, summary_path=summary_path)
 
 
+def test_compute_distribution_scores_adds_unencoded_original_numeric_metrics():
+    test_df = pd.DataFrame(
+        {
+            "x_cont": [0.0, 1.0, 2.0, 3.0],
+            "x_disc": [0, 0, 1, 1],
+            "x_cat_a": [1, 0, 1, 0],
+            "x_cat_b": [0, 1, 0, 1],
+        }
+    )
+    synth_df = pd.DataFrame(
+        {
+            "x_cont": [0.0, 1.0, 2.0, 3.0],
+            "x_disc": [1, 1, 0, 0],
+            "x_cat_a": [0, 0, 0, 0],
+            "x_cat_b": [1, 1, 1, 1],
+        }
+    )
+    transformed_schema = TabularSchema(
+        continuous_cols=["x_cont", "x_cat_a", "x_cat_b"],
+        discrete_cols=["x_disc"],
+        categorical_cols=[],
+    )
+    original_schema = TabularSchema(
+        continuous_cols=["x_cont"],
+        discrete_cols=["x_disc"],
+        categorical_cols=["x_cat"],
+    )
+
+    scores = full_mod._compute_distribution_scores(
+        test_df=test_df,
+        synth_df=synth_df,
+        transformed_schema=transformed_schema,
+        original_schema=original_schema,
+    )
+
+    assert "wasserstein_mean" in scores
+    assert "marginal_kl_mean" in scores
+    assert "wasserstein_mean_unencoded" in scores
+    assert "marginal_kl_mean_unencoded" in scores
+    assert "corr_frobenius_unencoded" in scores
+    assert scores["wasserstein_mean_unencoded"] == 0.0
+
+
 def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     manifest_path = write_runner_manifest(tmp_path)
     write_runner_csv(tmp_path)
@@ -269,6 +313,9 @@ def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     fold_payload = json.loads((result.output_dir / "crossval" / "per_fold" / "fold_0.json").read_text(encoding="utf-8"))
     assert "wasserstein_mean" in fold_payload["distribution"]
     assert "marginal_kl_mean" in fold_payload["distribution"]
+    assert "wasserstein_mean_unencoded" in fold_payload["distribution"]
+    assert "marginal_kl_mean_unencoded" in fold_payload["distribution"]
+    assert "corr_frobenius_unencoded" in fold_payload["distribution"]
     assert "corr_frobenius_transformed" in fold_payload["distribution"]
     assert "corr_frobenius_original" in fold_payload["distribution"]
     assert fold_payload["distribution"]["corr_frobenius_original_status"] == "ok"
@@ -278,6 +325,9 @@ def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     assert set(aggregate_payload["distribution"]) == {
         "wasserstein_mean",
         "marginal_kl_mean",
+        "wasserstein_mean_unencoded",
+        "marginal_kl_mean_unencoded",
+        "corr_frobenius_unencoded",
         "corr_frobenius_transformed",
         "corr_frobenius_original",
     }
@@ -539,6 +589,9 @@ def test_run_full_experiment_poster_fast_uses_single_holdout_and_caps_rows(tmp_p
     assert fold_payload["n_train"] + fold_payload["n_test"] == 5
     assert aggregate_payload["distribution"]["wasserstein_mean"]["std"] == 0.0
     assert aggregate_payload["distribution"]["marginal_kl_mean"]["std"] == 0.0
+    assert aggregate_payload["distribution"]["wasserstein_mean_unencoded"]["std"] == 0.0
+    assert aggregate_payload["distribution"]["marginal_kl_mean_unencoded"]["std"] == 0.0
+    assert aggregate_payload["distribution"]["corr_frobenius_unencoded"]["std"] == 0.0
     assert aggregate_payload["distribution"]["corr_frobenius_transformed"]["std"] == 0.0
     assert aggregate_payload["distribution"]["corr_frobenius_original"]["std"] == 0.0
 
