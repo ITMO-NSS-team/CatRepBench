@@ -96,6 +96,7 @@ def run_once(
     estimate_sample_epochs: int = 10,
     estimate_total_epochs: int = 300,
     estimate_total_runs: int = 35,
+    max_idle_polls: int | None = None,
 ) -> OrchestratorRunResult:
     del worksheet_name
 
@@ -107,6 +108,7 @@ def run_once(
     first_runner_argv: tuple[str, ...] | None = None
     claimed_jobs = 0
     had_failures = False
+    idle_polls = 0
 
     while True:
         snapshot = _load_snapshot(sheets.read_matrix(), manifest=manifest)
@@ -127,6 +129,14 @@ def run_once(
             if claimed_jobs == 0:
                 # No work found yet — all cells are either in-progress or done.
                 # Wait and retry instead of exiting immediately.
+                idle_polls += 1
+                if max_idle_polls is not None and idle_polls >= max_idle_polls:
+                    return OrchestratorRunResult(
+                        exit_code=0,
+                        claimed_coord=first_claimed_coord,
+                        runner_argv=first_runner_argv,
+                        claimed_jobs=claimed_jobs,
+                    )
                 time.sleep(_IDLE_POLL_INTERVAL_SECONDS)
                 continue
             # We already did some work and now there's nothing left — done.

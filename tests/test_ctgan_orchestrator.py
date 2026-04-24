@@ -268,6 +268,7 @@ def test_orchestrator_retries_on_ambiguous_claim(monkeypatch, tmp_path):
         manifest_path=manifest_path,
         worksheet_name="CTGAN",
         dry_run=False,
+        max_idle_polls=1,
     )
     # No jobs were successfully completed, but no failures either — exit 0.
     assert out.exit_code == 0
