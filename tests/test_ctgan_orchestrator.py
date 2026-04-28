@@ -106,14 +106,35 @@ class FakeSheetsClient:
                 run_id="someone-else",
                 owner="other-host:999:0",
                 stage="launching",
-                started_at="2026-04-02T00:00:00Z",
-                heartbeat_at="2026-04-02T00:00:00Z",
+                started_at="2999-04-02T00:00:00Z",
+                heartbeat_at="2999-04-02T00:00:00Z",
             )
         )
         instance._reread_uses_remaining = 1
         return instance
 
+    @classmethod
+    def claim_stolen_after_initial_owner_check(cls):
+        instance = cls()
+        instance._steal_after_initial_owner_check = True
+        instance._post_write_read_count = 0
+        return instance
+
     def read_cell(self, coord):
+        if getattr(self, "_steal_after_initial_owner_check", False) and self._raw_write_calls:
+            self._post_write_read_count += 1
+            if self._post_write_read_count == 1:
+                return self._cell_values.get(coord, " ")
+            stolen_payload = _payload(
+                "in-progress",
+                run_id="someone-else",
+                owner="other-host:999:0",
+                stage="launching",
+                started_at="2999-04-02T00:00:00Z",
+                heartbeat_at="2999-04-02T00:00:00Z",
+            )
+            self._cell_values[coord] = stolen_payload
+            return stolen_payload
         if self._reread_value is not None and self._raw_write_calls:
             if getattr(self, "_reread_uses_remaining", None):
                 self._reread_uses_remaining -= 1
@@ -274,6 +295,30 @@ def test_orchestrator_retries_on_ambiguous_claim(monkeypatch, tmp_path):
     # No jobs were successfully completed, but no failures either — exit 0.
     assert out.exit_code == 0
     assert out.claimed_jobs == 0
+
+
+def test_orchestrator_does_not_launch_when_claim_is_stolen_after_initial_check(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    fake_sheets = FakeSheetsClient.claim_stolen_after_initial_owner_check()
+    spawn_calls = []
+
+    def spawn_runner(*args, **kwargs):
+        spawn_calls.append((args, kwargs))
+        return fake_success_process(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", spawn_runner)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        dry_run=False,
+        max_idle_polls=1,
+    )
+
+    assert out.exit_code == 0
+    assert out.claimed_jobs == 0
+    assert spawn_calls == []
 
 
 def test_orchestrator_updates_heartbeat_while_process_is_alive(monkeypatch, tmp_path):

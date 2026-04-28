@@ -35,6 +35,8 @@ _DEFAULT_OUTPUT_ROOT = Path("experiments/results")
 _HEARTBEAT_FAILURE_TIMEOUT_SECONDS = 15 * 60
 _FAILURE_OUTPUT_TAIL_LINES = 8
 _IDLE_POLL_INTERVAL_SECONDS = 60  # pause between sheet polls when no claimable cell found
+_CLAIM_SETTLE_DELAY_SECONDS = 5.0
+_CLAIM_SETTLE_JITTER_SECONDS = 3.0
 _EOF = object()
 _STREAM_QUEUES: dict[int, queue.Queue[str | object]] = {}
 
@@ -213,6 +215,11 @@ def run_once(
 
         if not _ensure_lease_owner(sheets=sheets, coord=claim_coord, run_id=run_id, owner=owner):
             # Lost the race — another orchestrator claimed this cell first. Retry.
+            time.sleep(_IDLE_POLL_INTERVAL_SECONDS)
+            continue
+        if not _ensure_stable_lease_owner(sheets=sheets, coord=claim_coord, run_id=run_id, owner=owner):
+            # A near-simultaneous contender overwrote our claim after the first
+            # read-back. Do not launch duplicate work; retry from the sheet state.
             time.sleep(_IDLE_POLL_INTERVAL_SECONDS)
             continue
 
@@ -529,6 +536,17 @@ def _ensure_lease_owner(
 ) -> bool:
     payload = parse_cell_payload(sheets.read_cell(coord))
     return payload.status == "in-progress" and payload.run_id == run_id and payload.owner == owner
+
+
+def _ensure_stable_lease_owner(
+    *,
+    sheets: SheetsClientProtocol,
+    coord: str,
+    run_id: str,
+    owner: str,
+) -> bool:
+    time.sleep(_CLAIM_SETTLE_DELAY_SECONDS + random.uniform(0, _CLAIM_SETTLE_JITTER_SECONDS))
+    return _ensure_lease_owner(sheets=sheets, coord=coord, run_id=run_id, owner=owner)
 
 
 def _parse_progress_event(line: str) -> dict[str, str] | None:
