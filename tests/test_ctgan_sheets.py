@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 from datetime import datetime, timezone
 
 import pytest
@@ -180,6 +182,30 @@ def test_results_sheet_writer_uses_unencoded_distribution_metrics(tmp_path, monk
     assert fake_client.writes["H2"] == "30.123457"
 
 
+def test_build_results_sheet_row_does_not_fall_back_to_legacy_distribution_metric_names():
+    row = drive_mod.build_results_sheet_row(
+        model_name="CTGAN",
+        dataset_label="adult",
+        dataset_id="openml_adult",
+        encoding_label="one-hot",
+        encoding_id="one_hot_representation",
+        aggregate={
+            "distribution": {
+                "wasserstein_mean": {"mean": 1.25, "std": 0.1},
+                "marginal_kl_mean": {"mean": 2.5, "std": 0.2},
+                "corr_frobenius_transformed": {"mean": 3.75, "std": 0.3},
+            },
+            "tstr": {
+                "task_type": "classification",
+                "metrics": {"f1_weighted_pct_diff": {"mean": 4.5, "std": 0.4}},
+            },
+        },
+        folder_url="https://example.test/folder",
+    )
+
+    assert row[3:9] == ["", "", "", "", "", ""]
+
+
 def test_download_first_valid_drive_file_uses_newest_non_broken_candidate(tmp_path):
     records = [
         drive_mod.DriveFileRecord(
@@ -213,6 +239,59 @@ def test_download_first_valid_drive_file_uses_newest_non_broken_candidate(tmp_pa
 
     assert selected.file_id == "old-valid"
     assert (tmp_path / "ctgan.pkl").read_text(encoding="utf-8") == "valid"
+
+
+def test_drive_client_upload_file_overwrites_existing_file(tmp_path, monkeypatch):
+    local_file = tmp_path / "aggregate.json"
+    local_file.write_text('{"ok": true}', encoding="utf-8")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeMediaFileUpload:
+        def __init__(self, filename, *, mimetype=None, resumable=False):
+            self.filename = filename
+            self.mimetype = mimetype
+            self.resumable = resumable
+
+    monkeypatch.setitem(
+        sys.modules,
+        "googleapiclient.http",
+        types.SimpleNamespace(MediaFileUpload=FakeMediaFileUpload),
+    )
+
+    class FakeRequest:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class FakeFiles:
+        def list(self, **kwargs):
+            calls.append(("list", kwargs))
+            return FakeRequest({"files": [{"id": "existing-file"}]})
+
+        def update(self, **kwargs):
+            calls.append(("update", kwargs))
+            return FakeRequest({"id": kwargs["fileId"]})
+
+        def create(self, **kwargs):
+            calls.append(("create", kwargs))
+            return FakeRequest({"id": "new-file"})
+
+    class FakeService:
+        def files(self):
+            return FakeFiles()
+
+    client = object.__new__(drive_mod.DriveClient)
+    client._service = FakeService()
+
+    file_id = client.upload_file(local_file, "parent-folder", overwrite=True)
+
+    assert file_id == "existing-file"
+    assert [name for name, _kwargs in calls] == ["list", "update"]
+    update_kwargs = calls[1][1]
+    assert update_kwargs["fileId"] == "existing-file"
+    assert update_kwargs["supportsAllDrives"] is True
 
 
 def test_refresh_full_results_worksheet_archives_existing_results_and_writes_header():

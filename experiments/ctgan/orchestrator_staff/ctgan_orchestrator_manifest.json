@@ -7,15 +7,15 @@
       "id_col": null
     },
     {
-      "label": "Heart_Disease",
-      "dataset_id": "uci_Heart_Disease",
-      "target_col": "num",
-      "id_col": null
-    },
-    {
       "label": "Soybean__Large_",
       "dataset_id": "uci_Soybean__Large_",
       "target_col": "class",
+      "id_col": null
+    },
+    {
+      "label": "Heart_Disease",
+      "dataset_id": "uci_Heart_Disease",
+      "target_col": "num",
       "id_col": null
     },
     {
@@ -25,9 +25,9 @@
       "id_col": null
     },
     {
-      "label": "Student_Performance",
-      "dataset_id": "uci_Student_Performance",
-      "target_col": "G3",
+      "label": "Mammographic_Mass",
+      "dataset_id": "uci_Mammographic_Mass",
+      "target_col": "Severity",
       "id_col": null
     },
     {
@@ -43,38 +43,14 @@
       "id_col": null
     },
     {
-      "label": "Mammographic_Mass",
-      "dataset_id": "uci_Mammographic_Mass",
-      "target_col": "Severity",
+      "label": "Student_Performance",
+      "dataset_id": "uci_Student_Performance",
+      "target_col": "G3",
       "id_col": null
     },
     {
       "label": "Statlog__German_Credit_Data_",
       "dataset_id": "uci_Statlog__German_Credit_Data_",
-      "target_col": "class",
-      "id_col": null
-    },
-    {
-      "label": "Seoul_Bike_Sharing_Demand",
-      "dataset_id": "uci_Seoul_Bike_Sharing_Demand",
-      "target_col": "Functioning Day",
-      "id_col": null
-    },
-    {
-      "label": "PhishingWebsites",
-      "dataset_id": "openml_PhishingWebsites",
-      "target_col": "Result",
-      "id_col": null
-    },
-    {
-      "label": "Online_Shoppers_Purchasing_Intention_Dataset",
-      "dataset_id": "uci_Online_Shoppers_Purchasing_Intention_Dataset",
-      "target_col": "Revenue",
-      "id_col": null
-    },
-    {
-      "label": "nursery",
-      "dataset_id": "openml_nursery",
       "target_col": "class",
       "id_col": null
     },
@@ -91,15 +67,45 @@
       "id_col": null
     },
     {
+      "label": "PhishingWebsites",
+      "dataset_id": "openml_PhishingWebsites",
+      "target_col": "Result",
+      "id_col": null
+    },
+    {
       "label": "letter",
       "dataset_id": "openml_letter",
       "target_col": "class",
       "id_col": null
     },
     {
+      "label": "Online_Shoppers_Purchasing_Intention_Dataset",
+      "dataset_id": "uci_Online_Shoppers_Purchasing_Intention_Dataset",
+      "target_col": "Revenue",
+      "id_col": null
+    },
+    {
       "label": "default-of-credit-card-clients",
       "dataset_id": "openml_default-of-credit-card-clients",
       "target_col": "y",
+      "id_col": null
+    },
+    {
+      "label": "nursery",
+      "dataset_id": "openml_nursery",
+      "target_col": "class",
+      "id_col": null
+    },
+    {
+      "label": "connect-4",
+      "dataset_id": "openml_connect-4",
+      "target_col": "class",
+      "id_col": null
+    },
+    {
+      "label": "Seoul_Bike_Sharing_Demand",
+      "dataset_id": "uci_Seoul_Bike_Sharing_Demand",
+      "target_col": "Functioning Day",
       "id_col": null
     },
     {
@@ -111,12 +117,6 @@
     {
       "label": "adult",
       "dataset_id": "openml_adult",
-      "target_col": "class",
-      "id_col": null
-    },
-    {
-      "label": "connect-4",
-      "dataset_id": "openml_connect-4",
       "target_col": "class",
       "id_col": null
     },

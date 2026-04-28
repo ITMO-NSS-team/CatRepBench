@@ -357,8 +357,12 @@ class DriveClient:
     # File upload
     # ------------------------------------------------------------------
 
-    def upload_file(self, local_path: Path, parent_folder_id: str) -> str:
-        """Upload *local_path* to Drive inside *parent_folder_id*. Returns file ID."""
+    def upload_file(self, local_path: Path, parent_folder_id: str, *, overwrite: bool = True) -> str:
+        """Upload *local_path* to Drive inside *parent_folder_id*. Returns file ID.
+
+        When *overwrite* is true, an existing non-folder Drive file with the
+        same name in the parent folder is updated instead of creating a clone.
+        """
         try:
             from googleapiclient.http import MediaFileUpload
         except ImportError as exc:
@@ -367,8 +371,52 @@ class DriveClient:
             ) from exc
 
         mime_type = _guess_mime_type(local_path)
+        existing_id: str | None = None
+        if overwrite:
+            query = (
+                f"name = {json.dumps(local_path.name)} "
+                f"and '{parent_folder_id}' in parents "
+                f"and mimeType != '{_FOLDER_MIME_TYPE}' "
+                f"and trashed = false"
+            )
+
+            def _search() -> list[dict[str, Any]]:
+                return (
+                    self._service.files()
+                    .list(
+                        q=query,
+                        fields="files(id)",
+                        spaces="drive",
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                    )
+                    .execute()
+                    .get("files", [])
+                )
+
+            existing = _retry(_search)
+            if existing:
+                existing_id = str(existing[0]["id"])
+
         metadata: dict[str, Any] = {"name": local_path.name, "parents": [parent_folder_id]}
         media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=True)
+
+        if existing_id is not None:
+            def _update() -> dict[str, Any]:
+                return (
+                    self._service.files()
+                    .update(
+                        fileId=existing_id,
+                        body={"name": local_path.name},
+                        media_body=media,
+                        fields="id",
+                        supportsAllDrives=True,
+                    )
+                    .execute()
+                )
+
+            result = _retry(_update)
+            return str(result["id"])
 
         def _upload() -> dict[str, Any]:
             return (

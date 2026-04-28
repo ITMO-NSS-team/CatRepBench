@@ -100,29 +100,7 @@ def _load_dataset_entries(payload: object, *, project_root: Path) -> tuple[Datas
         )
         for _index, label, dataset_id, target_col, id_col in normalized_rows
     ]
-    row_counts = {
-        entry.dataset_id: _count_csv_rows(entry.csv_path)
-        for entry in entries
-    }
-
-    sorted_entries = sorted(
-        zip(normalized_rows, entries, strict=True),
-        key=lambda item: (
-            row_counts[item[1].dataset_id] is None,
-            row_counts[item[1].dataset_id] if row_counts[item[1].dataset_id] is not None else item[0][0],
-            item[0][0],
-        ),
-    )
-    return tuple(entry for _row_meta, entry in sorted_entries)
-
-
-def _count_csv_rows(csv_path: Path) -> int | None:
-    try:
-        with csv_path.open(encoding="utf-8", newline="") as f:
-            row_count = sum(1 for _ in f) - 1
-    except OSError:
-        return None
-    return max(row_count, 0)
+    return tuple(entries)
 
 
 def _load_encoding_entries(payload: object) -> tuple[EncodingEntry, ...]:

@@ -40,7 +40,7 @@ def test_load_manifest_resolves_dataset_label_without_source_prefix(tmp_path: Pa
     assert dataset.csv_path == tmp_path / "datasets" / "raw" / "openml_adult.csv"
 
 
-def test_load_manifest_sorts_datasets_by_raw_csv_size_smallest_first(tmp_path: Path):
+def test_load_manifest_preserves_declared_dataset_order_even_when_raw_csv_sizes_differ(tmp_path: Path):
     datasets_root = tmp_path / "datasets" / "raw"
     datasets_root.mkdir(parents=True)
     (datasets_root / "openml_large.csv").write_text("x,y\n1,0\n2,0\n3,0\n", encoding="utf-8")
@@ -64,7 +64,39 @@ def test_load_manifest_sorts_datasets_by_raw_csv_size_smallest_first(tmp_path: P
 
     manifest = load_ctgan_manifest(manifest_path, project_root=tmp_path)
 
-    assert [entry.label for entry in manifest.datasets] == ["small", "medium", "large"]
+    assert [entry.label for entry in manifest.datasets] == ["large", "small", "medium"]
+
+
+def test_repository_manifest_dataset_order_matches_runtime_heatmap_low_to_high():
+    project_root = Path(__file__).resolve().parents[1]
+    manifest = load_ctgan_manifest(
+        project_root / "experiments" / "ctgan" / "orchestrator_staff" / "ctgan_orchestrator_manifest.json",
+        project_root=project_root,
+    )
+
+    assert [entry.label for entry in manifest.datasets] == [
+        "conference_attendance",
+        "Soybean__Large_",
+        "Heart_Disease",
+        "Forest_Fires",
+        "Mammographic_Mass",
+        "Credit_Approval",
+        "eucalyptus",
+        "Student_Performance",
+        "Statlog__German_Credit_Data_",
+        "HTRU2",
+        "MagicTelescope",
+        "PhishingWebsites",
+        "letter",
+        "Online_Shoppers_Purchasing_Intention_Dataset",
+        "default-of-credit-card-clients",
+        "nursery",
+        "connect-4",
+        "Seoul_Bike_Sharing_Demand",
+        "bank-marketing",
+        "adult",
+        "Covertype",
+    ]
 
 
 def test_load_manifest_resolve_dataset_label_is_case_sensitive(tmp_path: Path):

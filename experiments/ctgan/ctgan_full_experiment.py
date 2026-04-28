@@ -19,6 +19,7 @@ from experiments.ctgan.ctgan_common import (
     build_preprocess_pipeline,
     default_discrete_cols,
 )
+from experiments.ctgan.orchestrator_staff.ctgan_runtime_env import prepare_runtime_env
 from experiments.ctgan.orchestrator_staff.ctgan_manifest import load_ctgan_manifest
 from experiments.ctgan.ctgan_tuning import estimate_ctgan_runtime, select_ctgan_best_params
 from genbench.data.datamodule import TabularDataModule
@@ -846,21 +847,8 @@ def run_full_ctgan_experiment(
     )
 
 
-def _load_dotenv() -> None:
-    """Load .env from the project root if python-dotenv is available."""
-    try:
-        from dotenv import load_dotenv
-    except ImportError:
-        return
-    for parent in Path(__file__).resolve().parents:
-        env_file = parent / ".env"
-        if env_file.exists():
-            load_dotenv(env_file, override=False)
-            return
-
-
 def main(argv: list[str] | None = None) -> int:
-    _load_dotenv()
+    prepare_runtime_env()
     parser = argparse.ArgumentParser(description="Run the full CTGAN experiment pipeline.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--dataset-id", required=True)
