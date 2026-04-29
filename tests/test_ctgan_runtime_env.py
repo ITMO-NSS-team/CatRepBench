@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from experiments.ctgan.orchestrator_staff.ctgan_runtime_env import prepare_runtime_env
+from experiments.ctgan.orchestrator_staff.ctgan_sheets import SheetsConfig
 
 
 def test_prepare_runtime_env_resolves_drive_paths_and_repairs_missing_ca_bundles(monkeypatch, tmp_path):
@@ -37,3 +38,30 @@ def test_prepare_runtime_env_resolves_drive_paths_and_repairs_missing_ca_bundles
     assert os.environ["SSL_CERT_FILE"] == str(ca_bundle)
     assert os.environ["REQUESTS_CA_BUNDLE"] == str(ca_bundle)
     assert os.environ["CURL_CA_BUNDLE"] == str(ca_bundle)
+
+
+def test_prepare_runtime_env_loads_multiline_inline_service_account_json(monkeypatch, tmp_path):
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "\n".join(
+            [
+                "CATREPBENCH_GSHEETS_SPREADSHEET_ID=spreadsheet-id",
+                "CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON='{\"type\":\"service_account\",",
+                "\"project_id\":\"catrepbench-test\",",
+                "\"private_key\":\"-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n\"}'",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_SPREADSHEET_ID", raising=False)
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH", raising=False)
+
+    prepare_runtime_env(dotenv_path=dotenv_path)
+    config = SheetsConfig.from_env()
+
+    assert config.service_account_info == {
+        "type": "service_account",
+        "project_id": "catrepbench-test",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+    }

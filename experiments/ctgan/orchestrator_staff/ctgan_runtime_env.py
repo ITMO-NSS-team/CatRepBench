@@ -39,7 +39,21 @@ def _load_dotenv_file(env_file: Path) -> None:
 
 
 def _load_simple_dotenv(env_file: Path) -> None:
+    pending_key: str | None = None
+    pending_quote: str | None = None
+    pending_parts: list[str] = []
+
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        if pending_key is not None and pending_quote is not None:
+            pending_parts.append(raw_line)
+            if _ends_with_unescaped_quote(raw_line.rstrip(), pending_quote):
+                value = "\n".join(pending_parts)
+                os.environ[pending_key] = value[:-1]
+                pending_key = None
+                pending_quote = None
+                pending_parts = []
+            continue
+
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
@@ -50,9 +64,25 @@ def _load_simple_dotenv(env_file: Path) -> None:
             continue
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
+        elif value[:1] in {"'", '"'}:
+            pending_key = key
+            pending_quote = value[0]
+            pending_parts = [value[1:]]
+            continue
         else:
             value = value.split("#", 1)[0].strip()
         os.environ[key] = value
+
+
+def _ends_with_unescaped_quote(value: str, quote: str) -> bool:
+    if not value.endswith(quote):
+        return False
+    backslashes = 0
+    for char in reversed(value[:-1]):
+        if char != "\\":
+            break
+        backslashes += 1
+    return backslashes % 2 == 0
 
 
 def _resolve_relative_env_paths(base_dir: Path) -> None:

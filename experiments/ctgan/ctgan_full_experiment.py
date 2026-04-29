@@ -827,7 +827,7 @@ def run_full_ctgan_experiment(
 
     # ------------------------------------------------------------------
     # Optional: upload artifacts to Google Drive and record metrics in
-    # the Results sheet.  Silently skipped if Drive env vars are absent.
+    # the Results sheet. Skipped only when Drive env vars are absent.
     # ------------------------------------------------------------------
     _maybe_upload_to_drive(
         run_dir=run_dir,
@@ -908,8 +908,10 @@ def _maybe_upload_to_drive(
 ) -> None:
     """Upload artifacts to Google Drive and write a row in the Results sheet.
 
-    Silently no-ops when CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID is not set,
-    so existing pipelines without Drive configuration are unaffected.
+    No-ops when CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID is not set, so existing
+    pipelines without Drive configuration are unaffected. When Drive is
+    configured, failures propagate so the orchestrator does not mark a cell
+    done while Drive/Results saving failed.
     """
     try:
         from experiments.ctgan.orchestrator_staff.ctgan_drive import (
@@ -968,10 +970,10 @@ def _maybe_upload_to_drive(
             encoding_method=encoding_method,
         )
     except Exception as exc:  # noqa: BLE001
-        # Drive upload is best-effort — do not crash the experiment
         import traceback
         print(f"[ctgan_drive] WARNING: Drive upload failed: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":

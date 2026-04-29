@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 import experiments.ctgan.ctgan_full_experiment as full_mod
+import experiments.ctgan.orchestrator_staff.ctgan_drive as drive_mod
 from genbench.data.schema import TabularSchema
 
 
@@ -752,6 +753,46 @@ def test_cli_routes_to_runtime_estimate_mode(monkeypatch, tmp_path):
     assert captured["estimate_sample_epochs"] == 12
     assert captured["estimate_total_runs"] == 35
     assert captured["device"] == "cpu"
+
+
+def test_drive_upload_failure_is_not_silently_marked_success(monkeypatch, tmp_path):
+    progress_stream = StringIO()
+
+    class FakeDriveConfig:
+        @staticmethod
+        def is_configured():
+            return True
+
+        @staticmethod
+        def from_env():
+            return SimpleNamespace()
+
+    class FakeDriveClient:
+        def __init__(self, config):
+            self.config = config
+
+    def fail_upload(**kwargs):
+        raise RuntimeError("drive upload failed")
+
+    monkeypatch.setattr(drive_mod, "DriveConfig", FakeDriveConfig)
+    monkeypatch.setattr(drive_mod, "DriveClient", FakeDriveClient)
+    monkeypatch.setattr(drive_mod, "upload_experiment_artifacts", fail_upload)
+
+    try:
+        full_mod._maybe_upload_to_drive(
+            run_dir=tmp_path,
+            aggregate_metrics_path=tmp_path / "aggregate.json",
+            dataset_id="openml_adult",
+            dataset_label="adult",
+            encoding_method="one_hot_representation",
+            encoding_label="one-hot",
+            progress_stream=progress_stream,
+            progress_format="jsonl",
+        )
+    except RuntimeError as exc:
+        assert "drive upload failed" in str(exc)
+    else:
+        raise AssertionError("Expected configured Drive upload failure to propagate")
 
 
 def test_full_experiment_cli_help_runs_as_script():
