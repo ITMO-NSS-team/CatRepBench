@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import pytest
 
 pytest.importorskip("optuna")
 
-from experiments import ctgan_tuning as tune_mod
+from experiments.ctgan import ctgan_tuning as tune_mod
 from genbench.data.schema import TabularSchema
 
 
 class DummyCtganGenerative:
     created: list["DummyCtganGenerative"] = []
+    fit_output_writes: list[str] = []
 
     def __init__(self, discrete_cols=None, ctgan_kwargs=None):
         self.discrete_cols = list(discrete_cols or [])
@@ -27,6 +29,9 @@ class DummyCtganGenerative:
     def fit(self, df: pd.DataFrame, schema: TabularSchema) -> "DummyCtganGenerative":
         self.train_df = df.reset_index(drop=True).copy()
         self.fit_schema = schema
+        for chunk in self.fit_output_writes:
+            sys.stderr.write(chunk)
+            sys.stderr.flush()
         self.fitted_ = True
         return self
 
@@ -131,6 +136,24 @@ def test_tune_ctgan_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert any(col.startswith("x_cat__") for col in DummyCtganGenerative.created[0].train_df.columns)
 
 
+def test_tune_ctgan_uses_300_epochs_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+    )
+
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 300
+
+
 def test_tune_ctgan_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []
@@ -153,6 +176,22 @@ def test_tune_ctgan_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):
     assert (result.model_artifacts_dir / "ctgan.pkl").exists()
 
 
+def test_tune_ctgan_can_write_to_explicit_output_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    result = tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=1,
+        output_dir=tmp_path / "run" / "tuning",
+        device="cpu",
+    )
+    assert result.output_dir == tmp_path / "run" / "tuning"
+    assert (result.output_dir / "summary.json").exists()
+
+
 def test_tune_ctgan_and_return_params_wrapper(tmp_path, monkeypatch):
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []
@@ -172,6 +211,26 @@ def test_tune_ctgan_and_return_params_wrapper(tmp_path, monkeypatch):
     assert set(out.keys()) == {"best_params", "best_value", "best_source", "summary_path"}
     assert isinstance(out["best_params"], dict)
     assert Path(out["summary_path"]).exists()
+
+
+def test_select_ctgan_best_params_wrapper_returns_only_selection_contract(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+
+    out = tune_mod.select_ctgan_best_params(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="my ds",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=1,
+        seed=13,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+    )
+
+    assert set(out.keys()) == {"best_params", "best_value", "best_source"}
+    assert isinstance(out["best_params"], dict)
 
 
 def test_tune_ctgan_regression_branch_scales_target_and_keeps_it_continuous(tmp_path, monkeypatch):
@@ -316,3 +375,182 @@ def test_tune_ctgan_label_encodes_categorical_target_for_classification(tmp_path
     fitted_train = DummyCtganGenerative.created[0].train_df
     assert fitted_train is not None
     assert pd.api.types.is_integer_dtype(fitted_train["target"])
+
+
+def test_parse_ctgan_fit_progress_line_extracts_trial_fraction():
+    line = "Gen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it]"
+
+    progress = tune_mod._parse_ctgan_fit_progress_line(line)
+
+    assert progress is not None
+    assert progress.current_step == 15
+    assert progress.total_steps == 300
+    assert progress.fraction == pytest.approx(0.05)
+    assert progress.display_text == line
+    assert tune_mod._parse_ctgan_fit_progress_line("ordinary log line") is None
+
+
+def test_tune_ctgan_progress_callback_emits_trial_progress_and_eta(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = [
+        "\rGen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it]"
+    ]
+    progress_messages: list[str] = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=progress_messages.append,
+    )
+
+    assert any("trial 1/1" in message for message in progress_messages)
+    assert any("15/300" in message for message in progress_messages)
+    assert any("tuning eta" in message for message in progress_messages)
+
+
+def test_tune_ctgan_progress_callback_emits_initial_fit_state_before_first_epoch_update(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = []
+    progress_messages: list[str] = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=progress_messages.append,
+    )
+
+    assert any("trial 1/1" in message for message in progress_messages)
+    assert any("0/300" in message for message in progress_messages)
+    assert any("waiting for first fit update" in message for message in progress_messages)
+    assert any("tuning eta" in message for message in progress_messages)
+
+
+def test_tune_ctgan_enables_ctgan_verbose_when_progress_callback_is_present(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = []
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=lambda _message: None,
+    )
+
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["verbose"] is True
+
+
+def test_fit_progress_capture_estimates_eta_at_start_of_second_trial(monkeypatch):
+    messages: list[str] = []
+    model = DummyCtganGenerative(ctgan_kwargs={"epochs": 300})
+
+    monkeypatch.setattr(tune_mod.time, "monotonic", lambda: 160.0)
+
+    tune_mod._fit_model_with_progress_capture(
+        model=model,
+        train_df=_build_df(),
+        transformed_schema=_build_schema(),
+        total_trials=30,
+        current_trial=2,
+        completed_trials=1,
+        tuning_started_at=100.0,
+        progress_callback=messages.append,
+        total_fit_steps=300,
+    )
+
+    assert messages
+    assert "trial 2/30" in messages[0]
+    assert "0/300" in messages[0]
+    assert "waiting for first fit update" in messages[0]
+    assert "tuning eta calculating" not in messages[0]
+
+
+def test_tune_ctgan_progress_callback_preserves_non_progress_fit_output(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = [
+        "warning: fit emitted diagnostics\n",
+        "\rGen. (-1.39) | Discrim. (-0.58):   5%|▌         | 15/300 [00:54<17:02,  3.59s/it]",
+    ]
+
+    tune_mod.tune_ctgan(
+        df=_build_df(),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=300,
+        seed=7,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+        progress_callback=lambda message: None,
+    )
+
+    captured = capsys.readouterr()
+    assert "warning: fit emitted diagnostics" in captured.err
+
+
+def test_estimate_ctgan_runtime_projects_sampled_fit_to_full_pipeline(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+    DummyCtganGenerative.fit_output_writes = []
+    monkeypatch.setattr(
+        tune_mod,
+        "_score_synthetic",
+        lambda **kwargs: (0.25, {"objective_score": 0.25, "wasserstein_mean": 0.25}),
+    )
+
+    monotonic_values = iter([10.0, 22.0, 22.0, 25.0])
+    monkeypatch.setattr(tune_mod.time, "monotonic", lambda: next(monotonic_values))
+
+    result = tune_mod.estimate_ctgan_runtime(
+        df=_build_df(n=50),
+        schema=_build_schema(),
+        dataset="adult sample",
+        encoding_method="one_hot_representation",
+        sample_epochs=10,
+        projected_epochs=300,
+        projected_total_runs=35,
+        output_dir=tmp_path / "estimate",
+        device="cpu",
+    )
+
+    assert result.summary_path.exists()
+    assert DummyCtganGenerative.created
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 10
+    assert result.projected_trial_seconds == pytest.approx(363.0)
+    assert result.projected_full_pipeline_seconds == pytest.approx(12705.0)
+
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert payload["mode"] == "runtime_estimate"
+    assert payload["sample_epochs"] == 10
+    assert payload["projected_epochs"] == 300
+    assert payload["projected_total_runs"] == 35
+    assert payload["fit_seconds_sampled"] == pytest.approx(12.0)
+    assert payload["post_fit_seconds"] == pytest.approx(3.0)
+    assert payload["projected_fit_seconds"] == pytest.approx(360.0)
+    assert payload["projected_trial_seconds"] == pytest.approx(363.0)
+    assert payload["projected_full_pipeline_hours"] == pytest.approx(12705.0 / 3600.0)

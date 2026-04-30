@@ -27,7 +27,7 @@ def _build_char_ngrams(value: str, ngram_range: Tuple[int, int], add_boundaries:
         if len(text) < n:
             continue
         for idx in range(len(text) - n + 1):
-            gram = text[idx: idx + n]
+            gram = text[idx : idx + n]
             grams[gram] = grams.get(gram, 0) + 1
 
     return grams
@@ -78,13 +78,11 @@ class SimilarityRepresentation:
     max_prototypes: int | None = None
     drop_original_categoricals: bool = True
 
-    # fitted state
     fitted_: bool = False
     categorical_cols_: List[str] = field(default_factory=list)
     prototypes_: Dict[str, List[str]] = field(default_factory=dict)
     out_cols_: Dict[str, List[str]] = field(default_factory=dict)
 
-    # cached, reconstructed on fit/from_state
     prototype_ngrams_: Dict[str, List[Dict[str, int]]] = field(default_factory=dict, repr=False)
 
     @staticmethod

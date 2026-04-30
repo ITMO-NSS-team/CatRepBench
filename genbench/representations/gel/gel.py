@@ -282,7 +282,7 @@ class GELRepresentation:
         token_matrix: np.ndarray,
         labels: pd.Series | None,
     ) -> np.ndarray:
-        n_rows, token_count = token_matrix.shape
+        _n_rows, token_count = token_matrix.shape
         if token_count == 0:
             return np.zeros((0, 0), dtype=float)
 
@@ -335,7 +335,6 @@ class GELRepresentation:
         vectors = vectors[:, positive]
         values = values[positive]
 
-        # Stabilize signs to keep outputs deterministic across equivalent decompositions.
         for idx in range(vectors.shape[1]):
             pivot = int(np.argmax(np.abs(vectors[:, idx])))
             if vectors[pivot, idx] < 0:
@@ -343,3 +342,4 @@ class GELRepresentation:
 
         embedding = vectors * np.sqrt(np.clip(values, a_min=0.0, a_max=None))
         return _pad_vectors(embedding, self.embedding_dim)
+
