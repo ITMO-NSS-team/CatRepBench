@@ -36,15 +36,18 @@ def _tvae_cls():
     return TvaeGenerative
 
 
-def test_tvae_wrapper_import_does_not_require_ctgan_package(monkeypatch):
-    monkeypatch.setitem(sys.modules, "ctgan", None)
-
+def test_tvae_wrapper_uses_module_level_tvae_import(monkeypatch):
     import importlib
+
+    mod = types.ModuleType("ctgan")
+    mod.TVAE = DummyTVAE
+    monkeypatch.setitem(sys.modules, "ctgan", mod)
+
     import genbench.generative.tvae.tvae as module
 
     reloaded = importlib.reload(module)
 
-    assert hasattr(reloaded, "TvaeGenerative")
+    assert reloaded.TVAE is DummyTVAE
 
 
 def test_fit_uses_schema_discrete_columns(dummy_tvae_module):

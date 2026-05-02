@@ -10,13 +10,7 @@ import pandas as pd
 from genbench.data.schema import TabularSchema
 from genbench.generative.base import BaseGenerative, GenerativeState
 
-
-def _import_tvae():
-    try:
-        from ctgan import TVAE  # type: ignore
-    except Exception as exc:  # pragma: no cover - optional dependency
-        raise ImportError("ctgan package with TVAE is required for TvaeGenerative.") from exc
-    return TVAE
+from ctgan import TVAE  # type: ignore
 
 
 @dataclass
@@ -41,8 +35,6 @@ class TvaeGenerative(BaseGenerative):
         return False
 
     def fit(self, df: pd.DataFrame, schema: TabularSchema) -> "TvaeGenerative":
-        TVAE = _import_tvae()
-
         if self.discrete_cols is None:
             candidate = list(schema.categorical_cols) + list(schema.discrete_cols)
             self.used_discrete_cols_ = [c for c in candidate if c in df.columns]

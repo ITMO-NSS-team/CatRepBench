@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from experiments.ctgan.ctgan_common import DEFAULT_CTGAN_EPOCHS, build_ctgan_kwargs
+from experiments.ctgan.ctgan_tuning import estimate_ctgan_runtime, select_ctgan_best_params
 from experiments.tvae.tvae_common import DEFAULT_TVAE_EPOCHS, build_tvae_kwargs
+from experiments.tvae.tvae_tuning import estimate_tvae_runtime, select_tvae_best_params
 from genbench.generative.base import BaseGenerative
 from genbench.generative.ctgan.ctgan import CtganGenerative
 from genbench.generative.tvae.tvae import TvaeGenerative
@@ -30,30 +32,6 @@ def _create_tvae(discrete_cols: list[str], model_kwargs: dict[str, Any]) -> Base
     return TvaeGenerative(discrete_cols=discrete_cols, tvae_kwargs=model_kwargs)
 
 
-def _select_ctgan_best_params(**kwargs: Any) -> dict[str, Any]:
-    from experiments.ctgan.ctgan_tuning import select_ctgan_best_params
-
-    return select_ctgan_best_params(**kwargs)
-
-
-def _estimate_ctgan_runtime(**kwargs: Any) -> Any:
-    from experiments.ctgan.ctgan_tuning import estimate_ctgan_runtime
-
-    return estimate_ctgan_runtime(**kwargs)
-
-
-def _select_tvae_best_params(**kwargs: Any) -> dict[str, Any]:
-    from experiments.tvae.tvae_tuning import select_tvae_best_params
-
-    return select_tvae_best_params(**kwargs)
-
-
-def _estimate_tvae_runtime(**kwargs: Any) -> Any:
-    from experiments.tvae.tvae_tuning import estimate_tvae_runtime
-
-    return estimate_tvae_runtime(**kwargs)
-
-
 _MODELS: dict[str, ExperimentModelSpec] = {
     "ctgan": ExperimentModelSpec(
         model_id="ctgan",
@@ -62,8 +40,8 @@ _MODELS: dict[str, ExperimentModelSpec] = {
         default_epochs=DEFAULT_CTGAN_EPOCHS,
         build_model_kwargs=build_ctgan_kwargs,
         create_generative=_create_ctgan,
-        select_best_params=_select_ctgan_best_params,
-        estimate_runtime=_estimate_ctgan_runtime,
+        select_best_params=select_ctgan_best_params,
+        estimate_runtime=estimate_ctgan_runtime,
     ),
     "tvae": ExperimentModelSpec(
         model_id="tvae",
@@ -72,8 +50,8 @@ _MODELS: dict[str, ExperimentModelSpec] = {
         default_epochs=DEFAULT_TVAE_EPOCHS,
         build_model_kwargs=build_tvae_kwargs,
         create_generative=_create_tvae,
-        select_best_params=_select_tvae_best_params,
-        estimate_runtime=_estimate_tvae_runtime,
+        select_best_params=select_tvae_best_params,
+        estimate_runtime=estimate_tvae_runtime,
     ),
 }
 
