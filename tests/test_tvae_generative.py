@@ -5,8 +5,6 @@ import pandas as pd
 import pytest
 
 from genbench.data.schema import TabularSchema
-from genbench.generative.tvae import tvae as tvae_module
-from genbench.generative.tvae.tvae import TvaeGenerative
 
 
 class DummyTVAE:
@@ -23,14 +21,30 @@ class DummyTVAE:
         return pd.DataFrame({"synth": list(range(n))})
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def dummy_tvae_module(monkeypatch):
     """Inject a dummy TVAE directly into the wrapper module."""
     mod = types.ModuleType("ctgan")
     mod.TVAE = DummyTVAE
     monkeypatch.setitem(sys.modules, "ctgan", mod)
-    monkeypatch.setattr(tvae_module, "TVAE", DummyTVAE)
     return DummyTVAE
+
+
+def _tvae_cls():
+    from genbench.generative.tvae.tvae import TvaeGenerative
+
+    return TvaeGenerative
+
+
+def test_tvae_wrapper_import_does_not_require_ctgan_package(monkeypatch):
+    monkeypatch.setitem(sys.modules, "ctgan", None)
+
+    import importlib
+    import genbench.generative.tvae.tvae as module
+
+    reloaded = importlib.reload(module)
+
+    assert hasattr(reloaded, "TvaeGenerative")
 
 
 def test_fit_uses_schema_discrete_columns(dummy_tvae_module):
@@ -47,7 +61,7 @@ def test_fit_uses_schema_discrete_columns(dummy_tvae_module):
         categorical_cols=["cat"],
     )
 
-    model = TvaeGenerative()
+    model = _tvae_cls()()
     model.fit(df, schema)
 
     assert model.fitted_ is True
@@ -61,7 +75,7 @@ def test_sample_returns_dataframe_after_fit(dummy_tvae_module):
     df = pd.DataFrame({"cat": ["a"], "disc": [1]})
     schema = TabularSchema(continuous_cols=[], discrete_cols=["disc"], categorical_cols=["cat"])
 
-    model = TvaeGenerative()
+    model = _tvae_cls()()
     model.fit(df, schema)
     out = model.sample(3)
 
@@ -71,7 +85,7 @@ def test_sample_returns_dataframe_after_fit(dummy_tvae_module):
 
 
 def test_get_loss_history_formats_dict(dummy_tvae_module):
-    model = TvaeGenerative()
+    model = _tvae_cls()()
     dummy = dummy_tvae_module()
     dummy.loss_values = pd.DataFrame(
         {
@@ -87,7 +101,7 @@ def test_get_loss_history_formats_dict(dummy_tvae_module):
 
 
 def test_save_and_load_artifacts_round_trip(tmp_path, dummy_tvae_module):
-    model = TvaeGenerative()
+    model = _tvae_cls()()
     dummy = dummy_tvae_module()
     dummy.some_attr = "keep_me"
     model.model_ = dummy
@@ -97,16 +111,16 @@ def test_save_and_load_artifacts_round_trip(tmp_path, dummy_tvae_module):
     artifacts_dir = tmp_path / "artifacts"
     model.save_artifacts(artifacts_dir)
 
-    loaded = TvaeGenerative.load_artifacts(artifacts_dir)
+    loaded = _tvae_cls().load_artifacts(artifacts_dir)
     assert isinstance(loaded.model_, dummy_tvae_module)
     assert loaded.used_discrete_cols_ == ["cat"]
     assert loaded.fitted_ is True
 
 
-def test_state_round_trip():
-    model = TvaeGenerative(discrete_cols=["a", "b"], tvae_kwargs={"epochs": 10})
+def test_state_round_trip(dummy_tvae_module):
+    model = _tvae_cls()(discrete_cols=["a", "b"], tvae_kwargs={"epochs": 10})
     state = model.get_state()
-    restored = TvaeGenerative.from_state(state)
+    restored = _tvae_cls().from_state(state)
 
     assert restored.discrete_cols == ["a", "b"]
     assert restored.tvae_kwargs == {"epochs": 10}
