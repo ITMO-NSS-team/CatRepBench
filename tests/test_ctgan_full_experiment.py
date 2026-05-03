@@ -8,10 +8,20 @@ import sys
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import experiments.ctgan.ctgan_full_experiment as full_mod
+import experiments.ctgan.experiment_models as model_mod
 import experiments.ctgan.orchestrator_staff.ctgan_drive as drive_mod
 from genbench.data.schema import TabularSchema
+
+
+@pytest.fixture(autouse=True)
+def disable_drive_env(monkeypatch):
+    monkeypatch.delenv("CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID", raising=False)
+    monkeypatch.delenv("CATREPBENCH_GDRIVE_OAUTH_TOKEN_PATH", raising=False)
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH", raising=False)
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON", raising=False)
 
 
 def progress_stages(progress_stream: StringIO) -> list[str]:
@@ -95,6 +105,27 @@ def write_best_params_file(tmp_path: Path) -> Path:
     return path
 
 
+def write_tvae_best_params_file(tmp_path: Path) -> Path:
+    path = tmp_path / "tvae_best_params.json"
+    path.write_text(
+        json.dumps(
+            {
+                "best_params": {
+                    "embedding_dim": 128,
+                    "compress_dim": 256,
+                    "decompress_dim": 256,
+                    "batch_size": 1024,
+                    "learning_rate": 5e-4,
+                    "l2scale": 1e-5,
+                    "loss_factor": 2.0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 class DummyCtganGenerative:
     created: list["DummyCtganGenerative"] = []
 
@@ -111,6 +142,26 @@ class DummyCtganGenerative:
         if self._train_df is None:
             raise AssertionError("fit() must be called before sample()")
         return self._train_df.head(n).reset_index(drop=True)
+
+    def save_artifacts(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "ctgan.pkl").write_bytes(b"dummy-ctgan")
+
+
+class DummyTvaeGenerative(DummyCtganGenerative):
+    created: list["DummyTvaeGenerative"] = []
+
+    def __init__(self, *args, **kwargs):
+        self.tvae_kwargs = dict(kwargs.get("tvae_kwargs", {}))
+        super().__init__(*args, **kwargs)
+        DummyTvaeGenerative.created.append(self)
+
+    def save_artifacts(self, path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "tvae.pkl").write_bytes(b"dummy-tvae")
+
+    def get_loss_history(self):
+        return {"loss": [1.0, 0.5]}
 
 
 def fake_select_ctgan_best_params(*, output_dir, **kwargs):
@@ -335,6 +386,42 @@ def test_run_full_experiment_writes_expected_artifacts(tmp_path, monkeypatch):
     assert set(aggregate_payload["tstr"]["metrics"]) == {"r2_real", "r2_synth", "r2_pct_diff"}
     assert DummyCtganGenerative.created
     assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 300
+
+
+def test_run_full_experiment_supports_tvae_model_id(tmp_path, monkeypatch):
+    manifest_path = write_runner_manifest(tmp_path)
+    write_runner_csv(tmp_path)
+    best_params_file = write_tvae_best_params_file(tmp_path)
+    DummyTvaeGenerative.created = []
+    monkeypatch.setattr(model_mod, "TvaeGenerative", DummyTvaeGenerative)
+    monkeypatch.setattr(full_mod, "tstr_catboost", fake_tstr)
+    progress_stream = StringIO()
+
+    result = full_mod.run_full_ctgan_experiment(
+        manifest_path=manifest_path,
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        output_root=tmp_path / "results",
+        best_params_file=best_params_file,
+        skip_tuning=True,
+        model_id="tvae",
+        progress_stream=progress_stream,
+        device="cpu",
+    )
+
+    assert result.output_dir == tmp_path / "results" / "tvae" / "openml_adult" / "one_hot_representation"
+    assert (result.output_dir / "artifacts" / "fold_0" / "tvae.pkl").exists()
+    assert (result.output_dir / "artifacts" / "fold_0" / "loss_history.csv").exists()
+    summary = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert summary["model_id"] == "tvae"
+    assert summary["model_name"] == "TVAE"
+    assert summary["artifact_filename"] == "tvae.pkl"
+    assert DummyTvaeGenerative.created
+    assert DummyTvaeGenerative.created[0].tvae_kwargs["compress_dims"] == (256, 256)
+    events = [json.loads(line) for line in progress_stream.getvalue().splitlines()]
+    assert {event["model_id"] for event in events} == {"tvae"}
+    assert {event["model_name"] for event in events} == {"TVAE"}
 
 
 def test_run_full_experiment_passes_explicit_task_type_to_tuning(tmp_path, monkeypatch):
@@ -715,6 +802,39 @@ def test_cli_passes_poster_fast_and_max_rows(monkeypatch, tmp_path):
     assert exit_code == 0
     assert captured["poster_fast"] is True
     assert captured["max_rows"] == 5
+
+
+def test_cli_passes_model_id(monkeypatch, tmp_path):
+    manifest_path = write_runner_manifest(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return fake_run_full_experiment(**kwargs)
+
+    monkeypatch.setattr(full_mod, "run_full_ctgan_experiment", fake_runner)
+
+    exit_code = full_mod.main(
+        [
+            "--manifest",
+            str(manifest_path),
+            "--dataset-id",
+            "openml_adult",
+            "--dataset-label",
+            "adult",
+            "--encoding-method",
+            "one_hot_representation",
+            "--model-id",
+            "tvae",
+            "--output-root",
+            str(tmp_path / "results"),
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["model_id"] == "tvae"
 
 
 def test_cli_routes_to_runtime_estimate_mode(monkeypatch, tmp_path):
