@@ -60,8 +60,9 @@ def build_worker_argv(
     worksheet: str,
     output_root: Path,
     heartbeat_seconds: int,
+    model_id: str = "ctgan",
 ) -> list[str]:
-    return [
+    argv = [
         sys.executable,
         "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py",
         "--manifest",
@@ -73,6 +74,9 @@ def build_worker_argv(
         "--heartbeat-seconds",
         str(heartbeat_seconds),
     ]
+    if model_id != "ctgan":
+        argv.extend(["--model-id", model_id])
+    return argv
 
 
 def build_tmux_launch_command(
@@ -95,6 +99,7 @@ def write_session_metadata(
     metadata_path: Path,
     manifest_path: Path,
     worksheet: str,
+    model_id: str,
     log_path: Path,
     worker_argv: list[str],
 ) -> None:
@@ -107,6 +112,7 @@ def write_session_metadata(
         "log_path": str(log_path),
         "manifest": str(manifest_path),
         "worksheet": worksheet,
+        "model_id": model_id,
     }
     metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -118,6 +124,7 @@ def launch_session(
     output_root: Path,
     index: int,
     heartbeat_seconds: int = 120,
+    model_id: str = "ctgan",
 ) -> LaunchResult:
     _require_tmux()
     manifest_path = Path(manifest_path).resolve()
@@ -135,6 +142,7 @@ def launch_session(
         worksheet=worksheet,
         output_root=Path(output_root),
         heartbeat_seconds=heartbeat_seconds,
+        model_id=model_id,
     )
     launch_argv = build_tmux_launch_command(
         session_name=session_name,
@@ -148,6 +156,7 @@ def launch_session(
         metadata_path=metadata_path,
         manifest_path=manifest_path,
         worksheet=worksheet,
+        model_id=model_id,
         log_path=log_path,
         worker_argv=worker_argv,
     )
@@ -219,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser.add_argument("--output-root", default=str(_DEFAULT_OUTPUT_ROOT))
     launch_parser.add_argument("--heartbeat-seconds", type=int, default=120)
     launch_parser.add_argument("--index", type=int, default=1)
+    launch_parser.add_argument("--model-id", default="ctgan")
 
     attach_parser = subparsers.add_parser("attach")
     attach_parser.add_argument("--session", required=True)
@@ -240,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             output_root=Path(args.output_root),
             index=int(args.index),
             heartbeat_seconds=int(args.heartbeat_seconds),
+            model_id=args.model_id,
         )
         print(f"session: {result.session_name}")
         print(f"attach: {' '.join(result.attach_command)}")

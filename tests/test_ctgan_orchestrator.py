@@ -3,10 +3,16 @@ import json
 import os
 import subprocess
 import sys
+import types
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+
+pandas_stub = types.ModuleType("pandas")
+pandas_stub.read_csv = lambda *args, **kwargs: (_ for _ in ()).throw(OSError("stubbed pandas"))
+sys.modules.setdefault("pandas", pandas_stub)
+sys.modules.setdefault("numpy", types.ModuleType("numpy"))
 
 import experiments.ctgan.orchestrator_staff.ctgan_orchestrator as orchestrator_mod
 
@@ -473,6 +479,51 @@ def test_build_runner_argv_passes_common_best_params_file_skip_tuning_and_device
     assert argv[-2:] == ["--device", "cuda"]
 
 
+def test_build_runner_argv_adds_model_id_for_tvae(tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    dataset = SimpleNamespace(dataset_id="openml_adult", label="adult")
+    encoding = SimpleNamespace(encoding_id="one_hot_representation", label="one-hot")
+
+    argv = orchestrator_mod._build_runner_argv(
+        manifest_path=manifest_path,
+        dataset=dataset,
+        encoding=encoding,
+        output_root=tmp_path / "results",
+        best_params_file=None,
+        skip_tuning=False,
+        device="cuda",
+        poster_fast=False,
+        max_rows=None,
+        estimate_runtime=False,
+        estimate_sample_epochs=12,
+        estimate_total_epochs=300,
+        estimate_total_runs=35,
+        model_id="tvae",
+    )
+
+    assert "--model-id" in argv
+    assert argv[argv.index("--model-id") + 1] == "tvae"
+
+
+def test_orchestrator_writes_model_id_into_payloads(monkeypatch, tmp_path):
+    manifest_path = write_orchestrator_manifest(tmp_path)
+    fake_sheets = FakeSheetsClient.single_not_started_cell()
+    monkeypatch.setattr(orchestrator_mod, "spawn_runner", fake_success_process)
+
+    out = orchestrator_mod.run_once(
+        sheets=fake_sheets,
+        manifest_path=manifest_path,
+        worksheet_name="CTGAN",
+        model_id="tvae",
+        dry_run=False,
+        max_idle_polls=1,
+        heartbeat_seconds=0,
+    )
+
+    assert out.exit_code == 0
+    assert {payload.model_id for payload in fake_sheets.write_calls} == {"tvae"}
+
+
 def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkeypatch, tmp_path):
     manifest_path = write_orchestrator_manifest(tmp_path)
     best_params_file = tmp_path / "best_params.json"
@@ -503,6 +554,8 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
             str(manifest_path),
             "--worksheet",
             "CTGAN",
+            "--model-id",
+            "tvae",
             "--best-params-file",
             str(best_params_file),
             "--skip-tuning",
@@ -521,6 +574,7 @@ def test_orchestrator_main_passes_best_params_file_skip_tuning_and_device(monkey
     )
 
     assert exit_code == 0
+    assert captured["model_id"] == "tvae"
     assert captured["best_params_file"] == best_params_file.resolve()
     assert captured["skip_tuning"] is True
     assert captured["continue_on_failure"] is True
@@ -878,11 +932,33 @@ def test_infer_project_root_finds_repo_root_for_nested_manifest_path(tmp_path):
     assert resolved == project_root
 
 
-def test_orchestrator_cli_help_runs_as_script():
+def test_orchestrator_cli_help_runs_as_script(tmp_path):
     project_root = orchestrator_mod.Path(__file__).resolve().parents[1]
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    (stub_dir / "numpy.py").write_text("", encoding="utf-8")
+    (stub_dir / "pandas.py").write_text(
+        "class CategoricalDtype: pass\n"
+        "class _Types:\n"
+        "    def __getattr__(self, name):\n"
+        "        return lambda *args, **kwargs: False\n"
+        "class _Api:\n"
+        "    types = _Types()\n"
+        "api = _Api()\n"
+        "def read_csv(*args, **kwargs):\n"
+        "    raise OSError('stubbed pandas')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = (
+        str(stub_dir)
+        if not env.get("PYTHONPATH")
+        else str(stub_dir) + os.pathsep + env["PYTHONPATH"]
+    )
     completed = subprocess.run(
         [sys.executable, "experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py", "--help"],
         cwd=project_root,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
