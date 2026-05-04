@@ -361,3 +361,84 @@ def test_recompute_from_drive_uses_saved_models_without_refitting(tmp_path, monk
     assert fold["source_artifacts"]["model_file_id"] == "valid-old-model"
     assert summary["source_drive"]["folder_id"] == "drive-folder-id"
     assert result.rows[0][0:3] == ["CTGAN", "adult", "one-hot"]
+
+
+def test_recompute_pair_uses_tvae_artifact_filename(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeDrive:
+        def find_folder_path(self, *parts):
+            captured["folder"] = parts
+            return "folder-id"
+
+        def list_files_recursive(self, folder_id):
+            assert folder_id == "folder-id"
+            return [
+                recompute_mod.DriveFileRecord(
+                    file_id="model",
+                    name="tvae.pkl",
+                    mime_type="application/octet-stream",
+                    modified_time="2026-04-23T18:22:08.759Z",
+                    relative_path="artifacts/fold_0/tvae.pkl",
+                    parent_id="folder-id",
+                ),
+                recompute_mod.DriveFileRecord(
+                    file_id="summary",
+                    name="run_summary.json",
+                    mime_type="application/json",
+                    modified_time="2026-04-23T18:22:08.759Z",
+                    relative_path="run_summary.json",
+                    parent_id="folder-id",
+                ),
+            ]
+
+        def download_file(self, file_id, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if file_id == "summary":
+                destination.write_text(
+                    json.dumps({"poster_fast": {"enabled": True}, "crossval": {"n_folds": 1}}),
+                    encoding="utf-8",
+                )
+            else:
+                destination.write_bytes(b"model")
+
+        def folder_web_url(self, folder_id):
+            return f"https://drive.example/{folder_id}"
+
+        def ensure_folder_path(self, *parts, root_id=None):
+            return "upload-folder"
+
+        def upload_file(self, local_path, parent_id, *, overwrite=True):
+            return "uploaded-file"
+
+    monkeypatch.setattr(
+        recompute_mod,
+        "_valid_model_artifact",
+        lambda path, artifact_filename, model_spec=None: path.name == artifact_filename == "tvae.pkl",
+        raising=False,
+    )
+    monkeypatch.setattr(recompute_mod, "_load_model_artifacts_cpu", lambda path, model_spec: object(), raising=False)
+    monkeypatch.setattr(
+        recompute_mod,
+        "_evaluate_saved_model_fold",
+        lambda **kwargs: {"fold_id": 0, "distribution": {}, "utility": {"status": "unsupported_no_target"}},
+    )
+
+    manifest_path = _write_manifest(tmp_path)
+    _write_csv(tmp_path)
+    manifest = recompute_mod.load_ctgan_manifest(manifest_path, project_root=tmp_path)
+    dataset = manifest.datasets[0]
+    encoding = manifest.encodings[0]
+
+    recompute_mod._recompute_pair_from_drive(
+        manifest_path=manifest_path,
+        project_root=tmp_path,
+        dataset=dataset,
+        encoding=encoding,
+        output_root=tmp_path / "out",
+        drive_client=FakeDrive(),
+        model_id="tvae",
+        random_seed=42,
+    )
+
+    assert captured["folder"] == ("TVAE", "openml_adult", "one_hot_representation")

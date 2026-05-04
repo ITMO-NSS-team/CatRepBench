@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import experiments.ctgan.ctgan_full_experiment as full_mod
+from experiments.ctgan.experiment_models import ExperimentModelSpec, get_experiment_model
 from experiments.ctgan.orchestrator_staff.ctgan_manifest import (
     CtganManifest,
     DatasetEntry,
@@ -32,6 +33,7 @@ from genbench.evaluation.distribution.marginal_kl import MarginalKLDivergenceMet
 from genbench.evaluation.distribution.wasserstein import WassersteinDistanceMetric
 from genbench.evaluation.pipeline.single_run import DistributionEvaluationPipeline
 from genbench.generative.ctgan.ctgan import CtganGenerative
+from genbench.generative.tvae.tvae import TvaeGenerative
 
 
 DEFAULT_MANIFEST = Path("experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json")
@@ -775,9 +777,19 @@ def _valid_json_file(path: Path) -> bool:
     return True
 
 
-def _valid_ctgan_artifact(path: Path) -> bool:
-    _load_ctgan_artifacts_cpu(path.parent)
+def _valid_model_artifact(
+    path: Path,
+    artifact_filename: str = "ctgan.pkl",
+    model_spec: ExperimentModelSpec | None = None,
+) -> bool:
+    if path.name != artifact_filename or not path.exists() or path.stat().st_size <= 0:
+        return False
+    _load_model_artifacts_cpu(path.parent, model_spec or get_experiment_model("ctgan"))
     return True
+
+
+def _valid_ctgan_artifact(path: Path) -> bool:
+    return _valid_model_artifact(path, "ctgan.pkl", get_experiment_model("ctgan"))
 
 
 def _torch_load_cpu_from_bytes(buffer: bytes) -> Any:
@@ -794,10 +806,14 @@ def _torch_load_cpu_from_bytes(buffer: bytes) -> Any:
 
 
 def _load_ctgan_artifacts_cpu(path: Path) -> CtganGenerative:
+    return _load_model_artifacts_cpu(path, get_experiment_model("ctgan"))
+
+
+def _load_model_artifacts_cpu(path: Path, model_spec: ExperimentModelSpec) -> Any:
     path = path.resolve()
-    bundle_path = path / "ctgan.pkl"
+    bundle_path = path / model_spec.artifact_filename
     if not bundle_path.exists():
-        raise FileNotFoundError(f"ctgan.pkl not found in {path}")
+        raise FileNotFoundError(f"{model_spec.artifact_filename} not found in {path}")
 
     patched = False
     original_load_from_bytes: Any | None = None
@@ -818,7 +834,13 @@ def _load_ctgan_artifacts_cpu(path: Path) -> CtganGenerative:
         if patched:
             torch.storage._load_from_bytes = original_load_from_bytes  # type: ignore[union-attr]
 
-    obj = CtganGenerative()
+    if model_spec.model_id == "ctgan":
+        obj: Any = CtganGenerative()
+    elif model_spec.model_id == "tvae":
+        obj = TvaeGenerative()
+    else:
+        raise ValueError(f"Unsupported recompute model_id: {model_spec.model_id}")
+
     obj.model_ = payload.get("model")
     obj.used_discrete_cols_ = payload.get("used_discrete_cols", [])
     obj.fitted_ = bool(payload.get("fitted", obj.model_ is not None))
@@ -908,8 +930,9 @@ def _evaluate_saved_model_fold(
     model_dir: Path,
     is_regression: bool | None,
     source_model_record: DriveFileRecord,
+    model_spec: ExperimentModelSpec | None = None,
 ) -> dict[str, Any]:
-    model = _load_ctgan_artifacts_cpu(model_dir)
+    model = _load_model_artifacts_cpu(model_dir, model_spec or get_experiment_model("ctgan"))
     synth_df = model.sample(len(split_data.train_transformed)).reset_index(drop=True)
 
     distribution_scores = _compute_distribution_scores(
@@ -1038,10 +1061,13 @@ def _recompute_pair_from_drive(
     encoding: EncodingEntry,
     output_root: Path,
     drive_client: Any,
-    model_name: str,
     random_seed: int,
+    model_id: str = "ctgan",
+    model_name: str | None = None,
 ) -> RecomputedPair | None:
-    folder_id = drive_client.find_folder_path(model_name, dataset.dataset_id, encoding.encoding_id)
+    model_spec = get_experiment_model(model_id)
+    display_name = model_name or model_spec.display_name
+    folder_id = drive_client.find_folder_path(display_name, dataset.dataset_id, encoding.encoding_id)
     if folder_id is None:
         return None
 
@@ -1073,17 +1099,21 @@ def _recompute_pair_from_drive(
     fold_results: list[dict[str, Any]] = []
     model_file_records: list[dict[str, str]] = []
     for fold_id in range(n_folds):
-        logical_path = f"artifacts/fold_{fold_id}/ctgan.pkl"
+        logical_path = f"artifacts/fold_{fold_id}/{model_spec.artifact_filename}"
         candidates = records_by_path.get(logical_path, [])
         if not candidates:
             return None
 
-        local_model_path = run_dir / "artifacts" / f"fold_{fold_id}" / "ctgan.pkl"
+        local_model_path = run_dir / "artifacts" / f"fold_{fold_id}" / model_spec.artifact_filename
         selected_model_record = download_first_valid_drive_file(
             drive_client=drive_client,
             candidates=candidates,
             destination=local_model_path,
-            validator=_valid_ctgan_artifact,
+            validator=lambda path: _valid_model_artifact(
+                path,
+                model_spec.artifact_filename,
+                model_spec,
+            ),
         )
         model_file_records.append(
             {
@@ -1108,6 +1138,7 @@ def _recompute_pair_from_drive(
             split_data=split_data,
             schema=schema,
             model_dir=local_model_path.parent,
+            model_spec=model_spec,
             is_regression=is_regression,
             source_model_record=selected_model_record,
         )
@@ -1154,7 +1185,7 @@ def _recompute_pair_from_drive(
     full_mod._save_json(run_dir / "run_summary.json", local_summary)
 
     row = build_results_sheet_row(
-        model_name=model_name,
+        model_name=display_name,
         dataset_label=dataset.label,
         dataset_id=dataset.dataset_id,
         encoding_label=encoding.label,
@@ -1177,6 +1208,7 @@ def recompute_all_from_drive(
     output_root: Path | str = DEFAULT_OUTPUT_ROOT,
     drive_client: Any | None = None,
     sheets_config: Any | None = None,
+    model_id: str = "ctgan",
     model_name: str = "CTGAN",
     results_worksheet: str = "Results",
     archive_existing_results: bool = True,
@@ -1187,6 +1219,8 @@ def recompute_all_from_drive(
     output_root = Path(output_root)
     project_root = full_mod._infer_project_root(manifest_path)
     manifest = _load_manifest_in_json_order(manifest_path, project_root=project_root)
+    model_spec = get_experiment_model(model_id)
+    effective_model_name = model_name if model_spec.model_id == "ctgan" else model_spec.display_name
     drive = drive_client if drive_client is not None else LocalDriveReader(LocalDriveConfig.from_env())
     sheet_writer: IncrementalResultsWorksheetWriter | None = None
     if write_sheet:
@@ -1208,7 +1242,7 @@ def recompute_all_from_drive(
         for encoding in manifest.encodings:
             print(
                 "[ctgan_recompute_from_drive] scanning "
-                f"{model_name}/{dataset.dataset_id}/{encoding.encoding_id}",
+                f"{effective_model_name}/{dataset.dataset_id}/{encoding.encoding_id}",
                 flush=True,
             )
             try:
@@ -1219,7 +1253,8 @@ def recompute_all_from_drive(
                     encoding=encoding,
                     output_root=output_root,
                     drive_client=drive,
-                    model_name=model_name,
+                    model_id=model_spec.model_id,
+                    model_name=effective_model_name,
                     random_seed=random_seed,
                 )
             except FileNotFoundError as exc:
@@ -1277,9 +1312,10 @@ def _load_dotenv() -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Recompute CTGAN metrics from saved Google Drive ctgan.pkl artifacts."
+        description="Recompute model metrics from saved Google Drive artifacts."
     )
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    parser.add_argument("--model-id", default="ctgan")
     parser.add_argument("--model-name", default="CTGAN")
     parser.add_argument("--results-worksheet", default="Results")
     parser.add_argument("--archive-existing-results", action=argparse.BooleanOptionalAction, default=True)
@@ -1295,6 +1331,7 @@ def main(argv: list[str] | None = None) -> int:
     result = recompute_all_from_drive(
         manifest_path=args.manifest,
         output_root=args.output_root,
+        model_id=args.model_id,
         model_name=args.model_name,
         results_worksheet=args.results_worksheet,
         archive_existing_results=args.archive_existing_results,

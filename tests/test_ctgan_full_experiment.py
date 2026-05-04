@@ -915,6 +915,54 @@ def test_drive_upload_failure_is_not_silently_marked_success(monkeypatch, tmp_pa
         raise AssertionError("Expected configured Drive upload failure to propagate")
 
 
+def test_maybe_upload_to_drive_uses_model_display_name(monkeypatch, tmp_path):
+    calls = {}
+
+    class FakeDriveConfig:
+        @staticmethod
+        def is_configured():
+            return True
+
+        @staticmethod
+        def from_env():
+            return object()
+
+    class FakeDriveClient:
+        def __init__(self, config):
+            self.config = config
+
+    def fake_upload(**kwargs):
+        calls["upload"] = kwargs
+        return "https://drive.example/tvae"
+
+    def fake_write_results_row(**kwargs):
+        calls["row"] = kwargs
+
+    monkeypatch.setattr(drive_mod, "DriveConfig", FakeDriveConfig)
+    monkeypatch.setattr(drive_mod, "DriveClient", FakeDriveClient)
+    monkeypatch.setattr(drive_mod, "upload_experiment_artifacts", fake_upload)
+    monkeypatch.setattr(drive_mod, "write_results_row", fake_write_results_row)
+
+    metrics = tmp_path / "aggregate.json"
+    metrics.write_text(json.dumps({"distribution": {}, "tstr": {}}), encoding="utf-8")
+
+    full_mod._maybe_upload_to_drive(
+        run_dir=tmp_path,
+        aggregate_metrics_path=metrics,
+        model_id="tvae",
+        model_name="TVAE",
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        encoding_label="one-hot",
+        progress_stream=StringIO(),
+        progress_format="jsonl",
+    )
+
+    assert calls["upload"]["model_name"] == "TVAE"
+    assert calls["row"]["model_name"] == "TVAE"
+
+
 def test_full_experiment_cli_help_runs_as_script():
     project_root = Path(__file__).resolve().parents[1]
     completed = subprocess.run(
