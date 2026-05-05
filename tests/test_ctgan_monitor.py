@@ -1,3 +1,12 @@
+import sys
+import types
+
+experiment_models_stub = types.ModuleType("experiments.ctgan.experiment_models")
+experiment_models_stub.get_experiment_model = lambda model_id: types.SimpleNamespace(
+    display_name={"ctgan": "CTGAN", "tvae": "TVAE"}[str(model_id).strip().lower()]
+)
+sys.modules.setdefault("experiments.ctgan.experiment_models", experiment_models_stub)
+
 from experiments.ctgan.ctgan_monitor import build_monitor_payload, render_monitor_html
 
 
