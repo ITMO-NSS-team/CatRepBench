@@ -2,26 +2,77 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 _RETRY_DELAYS = (1, 2, 4, 8, 16)
+_DEFAULT_QUOTA_RETRY_SECONDS = 75.0
 _GSHEETS_SCOPES = ("https://www.googleapis.com/auth/spreadsheets",)
 
 
 def retry_call(func: Callable[[], Any], sleep: Callable[[float], None] = time.sleep) -> Any:
     last_error: Exception | None = None
-    for delay in _RETRY_DELAYS:
+    retry_index = 0
+    while True:
         try:
             return func()
         except Exception as exc:  # noqa: BLE001 - bound the retry policy around any API error
             last_error = exc
-            sleep(delay)
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("retry_call exhausted without executing the function")
+            if _is_sheets_quota_error(exc):
+                delay = _quota_retry_seconds(exc)
+                print(
+                    f"[sheets] quota exceeded; retrying in {delay:g}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                sleep(delay)
+                continue
+
+            if retry_index >= len(_RETRY_DELAYS):
+                raise last_error
+            sleep(_RETRY_DELAYS[retry_index])
+            retry_index += 1
+            if retry_index >= len(_RETRY_DELAYS):
+                raise last_error
+
+
+def _is_sheets_quota_error(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None) or getattr(response, "status", None)
+    if status_code == 429:
+        return True
+    text = str(exc).lower()
+    return (
+        "[429]" in text
+        or "quota exceeded" in text
+        or "rate_limit_exceeded" in text
+        or "too many requests" in text
+    )
+
+
+def _quota_retry_seconds(exc: Exception) -> float:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+        except Exception:
+            retry_after = None
+        if retry_after:
+            try:
+                return max(float(retry_after), 1.0)
+            except ValueError:
+                pass
+    raw_value = os.getenv("CATREPBENCH_GSHEETS_QUOTA_RETRY_SECONDS", "").strip()
+    if raw_value:
+        try:
+            return max(float(raw_value), 1.0)
+        except ValueError:
+            pass
+    return _DEFAULT_QUOTA_RETRY_SECONDS
 
 
 @dataclass(frozen=True)
