@@ -224,7 +224,6 @@ def _build_runtime_estimate_params() -> Dict[str, Any]:
     compress_dims = (128, 256, 512)
     decompress_dims = (128, 256, 512)
     batch_sizes = (256, 512, 1024)
-    learning_rate = math.sqrt(1e-4 * 2e-3)
     l2scale = math.sqrt(1e-6 * 1e-4)
     loss_factor = 2.0
 
@@ -244,7 +243,6 @@ def _build_runtime_estimate_params() -> Dict[str, Any]:
                                 "compress_dim": compress_dim,
                                 "decompress_dim": decompress_dim,
                                 "batch_size": batch_size,
-                                "learning_rate": learning_rate,
                                 "l2scale": l2scale,
                                 "loss_factor": loss_factor,
                             },
@@ -276,7 +274,6 @@ def _suggest_tvae_params(
     compress_dim = int(trial.suggest_categorical("compress_dim", [128, 256, 512]))
     decompress_dim = int(trial.suggest_categorical("decompress_dim", [128, 256, 512]))
     batch_size = int(trial.suggest_categorical("batch_size", [256, 512, 1024]))
-    learning_rate = float(trial.suggest_float("learning_rate", 1e-4, 2e-3, log=True))
     l2scale = float(trial.suggest_float("l2scale", 1e-6, 1e-4, log=True))
     loss_factor = float(trial.suggest_float("loss_factor", 1.0, 3.0))
 
@@ -286,7 +283,6 @@ def _suggest_tvae_params(
             "compress_dim": compress_dim,
             "decompress_dim": decompress_dim,
             "batch_size": batch_size,
-            "learning_rate": learning_rate,
             "l2scale": l2scale,
             "loss_factor": loss_factor,
         },

@@ -24,7 +24,7 @@ def test_build_tvae_kwargs_materializes_dims_for_cpu():
     assert out["compress_dims"] == (256, 256)
     assert out["decompress_dims"] == (512, 512)
     assert out["batch_size"] == 1024
-    assert out["learning_rate"] == 1e-3
+    assert "learning_rate" not in out
     assert out["l2scale"] == 1e-5
     assert out["loss_factor"] == 2.0
     assert out["cuda"] is False

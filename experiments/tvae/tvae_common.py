@@ -27,7 +27,6 @@ def build_tvae_kwargs(
         "compress_dims": (compress_dim, compress_dim),
         "decompress_dims": (decompress_dim, decompress_dim),
         "batch_size": int(best_params["batch_size"]),
-        "learning_rate": float(best_params["learning_rate"]),
         "l2scale": float(best_params["l2scale"]),
         "loss_factor": float(best_params["loss_factor"]),
         "cuda": device == "cuda",
