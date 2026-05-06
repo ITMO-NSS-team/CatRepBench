@@ -296,6 +296,44 @@ def _suggest_tvae_params(
     )
 
 
+def _select_best_completed_trial(
+    study: optuna.Study,
+    *,
+    trials_path: Path,
+    model_name: str,
+) -> optuna.trial.FrozenTrial:
+    trials_path.parent.mkdir(parents=True, exist_ok=True)
+    study.trials_dataframe().to_csv(trials_path, index=False)
+
+    trials = study.get_trials(deepcopy=False)
+    completed = [
+        trial
+        for trial in trials
+        if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None
+    ]
+    if completed:
+        return min(completed, key=lambda trial: float(trial.value))
+
+    state_counts: Dict[str, int] = {}
+    failure_notes: list[str] = []
+    for trial in trials:
+        state_counts[trial.state.name] = state_counts.get(trial.state.name, 0) + 1
+        failure = trial.user_attrs.get("failure")
+        if failure:
+            failure_notes.append(str(failure))
+
+    state_summary = ", ".join(
+        f"{state}={count}" for state, count in sorted(state_counts.items())
+    ) or "no trials"
+    message = (
+        f"No successful Optuna trials for {model_name} tuning; "
+        f"states: {state_summary}. See {trials_path}"
+    )
+    if failure_notes:
+        message = f"{message}. Last failure: {failure_notes[-1]}"
+    raise RuntimeError(message)
+
+
 def _fit_model_with_progress_capture(
     *,
     model: TvaeGenerative,
@@ -417,14 +455,18 @@ def tune_tvae(
                 schema=transformed_schema,
             )
             if not np.isfinite(score):
+                trial.set_user_attr("failure", "Non-finite score.")
                 raise optuna.TrialPruned("Non-finite score.")
             trial.set_user_attr("objective_metric", "wasserstein_mean")
             trial.set_user_attr("sample_size", int(len(val_df)))
             trial.set_user_attr("details", details)
             return float(score)
-        except optuna.TrialPruned:
+        except optuna.TrialPruned as exc:
+            if not trial.user_attrs.get("failure"):
+                trial.set_user_attr("failure", str(exc) or "Trial pruned.")
             raise
         except Exception as exc:
+            trial.set_user_attr("failure", f"{type(exc).__name__}: {exc}")
             raise optuna.TrialPruned(f"Trial failed: {exc}") from exc
         finally:
             completed_trials += 1
@@ -438,15 +480,11 @@ def tune_tvae(
     )
     duration_seconds = time.monotonic() - started_at
 
-    if study.best_trial is None:
-        raise RuntimeError("No successful Optuna trials.")
-
-    best_params = dict(study.best_trial.params)
-    best_value = float(study.best_value)
-    best_source = "stage1"
-
     trials_path = output_dir / "trials.csv"
-    study.trials_dataframe().to_csv(trials_path, index=False)
+    best_trial = _select_best_completed_trial(study, trials_path=trials_path, model_name="TVAE")
+    best_params = dict(best_trial.params)
+    best_value = float(best_trial.value)
+    best_source = "stage1"
 
     best_params_path = output_dir / "best_params.json"
     _save_json(best_params_path, {"best_params": best_params, "best_value": best_value, "best_source": best_source})

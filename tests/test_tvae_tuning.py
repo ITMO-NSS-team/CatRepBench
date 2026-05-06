@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-pytest.importorskip("optuna")
+optuna = pytest.importorskip("optuna")
 
 from experiments.tvae import tvae_tuning as tune_mod
 from genbench.data.schema import TabularSchema
@@ -143,6 +143,27 @@ def test_tune_tvae_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):
 
     assert result.model_artifacts_dir is not None
     assert (result.model_artifacts_dir / "tvae.pkl").exists()
+
+
+def test_tvae_best_trial_selection_reports_failed_trials_without_storage_error(tmp_path):
+    study = optuna.create_study(direction="minimize")
+    study.add_trial(
+        optuna.trial.create_trial(
+            state=optuna.trial.TrialState.PRUNED,
+            user_attrs={"failure": "fit exploded"},
+        )
+    )
+    trials_path = tmp_path / "trials.csv"
+
+    with pytest.raises(RuntimeError, match="No successful Optuna trials"):
+        tune_mod._select_best_completed_trial(
+            study,
+            trials_path=trials_path,
+            model_name="TVAE",
+        )
+
+    assert trials_path.exists()
+    assert "fit exploded" in trials_path.read_text(encoding="utf-8")
 
 
 def test_select_tvae_best_params_wrapper_returns_only_selection_contract(tmp_path, monkeypatch):
