@@ -22,6 +22,7 @@ def disable_drive_env(monkeypatch):
     monkeypatch.delenv("CATREPBENCH_GDRIVE_OAUTH_TOKEN_PATH", raising=False)
     monkeypatch.delenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_PATH", raising=False)
     monkeypatch.delenv("CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_SPREADSHEET_ID", raising=False)
 
 
 def progress_stages(progress_stream: StringIO) -> list[str]:
@@ -942,6 +943,11 @@ def test_maybe_upload_to_drive_uses_model_display_name(monkeypatch, tmp_path):
     monkeypatch.setattr(drive_mod, "DriveClient", FakeDriveClient)
     monkeypatch.setattr(drive_mod, "upload_experiment_artifacts", fake_upload)
     monkeypatch.setattr(drive_mod, "write_results_row", fake_write_results_row)
+    monkeypatch.setenv(
+        "CATREPBENCH_GSHEETS_SERVICE_ACCOUNT_JSON",
+        json.dumps({"type": "service_account"}),
+    )
+    monkeypatch.setenv("CATREPBENCH_GSHEETS_SPREADSHEET_ID", "sheet-id")
 
     metrics = tmp_path / "aggregate.json"
     metrics.write_text(json.dumps({"distribution": {}, "tstr": {}}), encoding="utf-8")
