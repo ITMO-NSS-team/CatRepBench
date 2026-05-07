@@ -22,6 +22,8 @@ class FoldData:
     fold_id: int
     train: pd.DataFrame
     test: pd.DataFrame
+    train_raw: Optional[pd.DataFrame] = None
+    test_raw: Optional[pd.DataFrame] = None
     # Fitted (fold-specific) transforms are returned for reproducibility / downstream decoding
     transforms: Optional[Any] = None
 
@@ -30,6 +32,8 @@ class FoldData:
 class HoldoutData:
     train: pd.DataFrame
     val: pd.DataFrame
+    train_raw: Optional[pd.DataFrame] = None
+    val_raw: Optional[pd.DataFrame] = None
     transforms: Optional[Any] = None
 
 
@@ -62,11 +66,15 @@ class TabularDataModule:
         schema: TabularSchema,
         transforms: Optional[Any] = None,
         reset_index: bool = True,
+        unseen_category_policy: str = "error",
         # If True, also validates that df does not contain duplicated columns in schema groups, etc.
         validate: bool = True,
     ) -> None:
         self.schema = schema
         self.transforms = transforms
+        if unseen_category_policy not in {"error", "move_to_train"}:
+            raise ValueError("unseen_category_policy must be 'error' or 'move_to_train'.")
+        self.unseen_category_policy = unseen_category_policy
 
         if validate:
             schema.validate(df)
@@ -97,10 +105,21 @@ class TabularDataModule:
         fold = self._kfold_splits[fold_id]
         train_raw = self.df_clean.iloc[fold.train_idx].copy()
         test_raw = self.df_clean.iloc[fold.test_idx].copy()
-        self._validate_no_unseen_categories(train_raw, test_raw, context=f"fold={fold_id} test")
+        train_raw, test_raw = self._resolve_unseen_categories(
+            train_df=train_raw,
+            other_df=test_raw,
+            context=f"fold={fold_id} test",
+        )
 
         if self.transforms is None:
-            return FoldData(fold_id=fold_id, train=train_raw, test=test_raw, transforms=None)
+            return FoldData(
+                fold_id=fold_id,
+                train=train_raw,
+                test=test_raw,
+                train_raw=train_raw.copy(),
+                test_raw=test_raw.copy(),
+                transforms=None,
+            )
 
         pipe = self._clone_transforms(self.transforms)
         pipe.fit(train_raw, self.schema)  # fit only on fold-train
@@ -110,7 +129,14 @@ class TabularDataModule:
         self._validate_post_transform(train, context=f"fold={fold_id} train")
         self._validate_post_transform(test, context=f"fold={fold_id} test", reference_cols=list(train.columns))
 
-        return FoldData(fold_id=fold_id, train=train, test=test, transforms=pipe)
+        return FoldData(
+            fold_id=fold_id,
+            train=train,
+            test=test,
+            train_raw=train_raw.reset_index(drop=True),
+            test_raw=test_raw.reset_index(drop=True),
+            transforms=pipe,
+        )
 
     def get_all_folds(self) -> Dict[int, FoldData]:
         if self._kfold_splits is None:
@@ -129,10 +155,20 @@ class TabularDataModule:
         sp = self._holdout_split
         train_raw = self.df_clean.iloc[sp.train_idx].copy()
         val_raw = self.df_clean.iloc[sp.val_idx].copy()
-        self._validate_no_unseen_categories(train_raw, val_raw, context="holdout val")
+        train_raw, val_raw = self._resolve_unseen_categories(
+            train_df=train_raw,
+            other_df=val_raw,
+            context="holdout val",
+        )
 
         if self.transforms is None:
-            return HoldoutData(train=train_raw, val=val_raw, transforms=None)
+            return HoldoutData(
+                train=train_raw,
+                val=val_raw,
+                train_raw=train_raw.copy(),
+                val_raw=val_raw.copy(),
+                transforms=None,
+            )
 
         pipe = self._clone_transforms(self.transforms)
         pipe.fit(train_raw, self.schema)  # fit only on holdout-train
@@ -142,7 +178,13 @@ class TabularDataModule:
         self._validate_post_transform(train, context="holdout train")
         self._validate_post_transform(val, context="holdout val", reference_cols=list(train.columns))
 
-        return HoldoutData(train=train, val=val, transforms=pipe)
+        return HoldoutData(
+            train=train,
+            val=val,
+            train_raw=train_raw.reset_index(drop=True),
+            val_raw=val_raw.reset_index(drop=True),
+            transforms=pipe,
+        )
 
     # --------- Optional convenience ---------
 
@@ -176,10 +218,7 @@ class TabularDataModule:
                 )
 
     def _validate_no_unseen_categories(self, train_df: pd.DataFrame, other_df: pd.DataFrame, context: str) -> None:
-        categorical_cols = list(self.schema.categorical_cols)
-        if self.schema.target_col is not None and self.schema.target_col in train_df.columns:
-            if is_categorical_like_dtype(train_df[self.schema.target_col]):
-                categorical_cols.append(self.schema.target_col)
+        categorical_cols = self._categorical_validation_cols(train_df)
 
         for col in categorical_cols:
             if col not in train_df.columns or col not in other_df.columns:
@@ -193,6 +232,48 @@ class TabularDataModule:
                     f"[{context}] Found categories not present in train for column '{col}': "
                     f"{unseen_rendered}"
                 )
+
+    def _resolve_unseen_categories(
+        self,
+        *,
+        train_df: pd.DataFrame,
+        other_df: pd.DataFrame,
+        context: str,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if self.unseen_category_policy == "error":
+            self._validate_no_unseen_categories(train_df, other_df, context=context)
+            return train_df, other_df
+
+        train_resolved = train_df.copy()
+        other_resolved = other_df.copy()
+        while True:
+            row_indices_to_move = self._rows_with_unseen_categories(train_resolved, other_resolved)
+            if not row_indices_to_move:
+                break
+            moved_rows = other_resolved.loc[sorted(row_indices_to_move)].copy()
+            train_resolved = pd.concat([train_resolved, moved_rows], axis=0, ignore_index=True)
+            other_resolved = other_resolved.drop(index=row_indices_to_move).reset_index(drop=True)
+
+        return train_resolved.reset_index(drop=True), other_resolved.reset_index(drop=True)
+
+    def _rows_with_unseen_categories(self, train_df: pd.DataFrame, other_df: pd.DataFrame) -> set[int]:
+        row_indices_to_move: set[int] = set()
+        categorical_cols = self._categorical_validation_cols(train_df)
+
+        for col in categorical_cols:
+            if col not in train_df.columns or col not in other_df.columns:
+                continue
+            train_values = {value for value in pd.unique(train_df[col].dropna())}
+            unseen_mask = other_df[col].notna() & ~other_df[col].isin(train_values)
+            row_indices_to_move.update(int(index) for index in other_df.index[unseen_mask].tolist())
+        return row_indices_to_move
+
+    def _categorical_validation_cols(self, train_df: pd.DataFrame) -> list[str]:
+        categorical_cols = list(self.schema.categorical_cols)
+        if self.schema.target_col is not None and self.schema.target_col in train_df.columns:
+            if is_categorical_like_dtype(train_df[self.schema.target_col]):
+                categorical_cols.append(self.schema.target_col)
+        return categorical_cols
 
     @staticmethod
     def _clone_transforms(transforms: Any) -> Any:

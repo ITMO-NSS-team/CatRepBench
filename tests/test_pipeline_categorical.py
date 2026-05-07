@@ -180,6 +180,80 @@ def test_holdout_raises_when_validation_has_unseen_category():
         dm.get_holdout()
 
 
+def test_kfold_moves_unseen_category_rows_to_train_when_policy_enabled():
+    df = pd.DataFrame(
+        {
+            "cat": ["a", "a", "a", "z"],
+            "cont": [1.0, 2.0, 3.0, 4.0],
+            "disc": [0, 1, 0, 1],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=["cont"],
+        discrete_cols=["disc"],
+        categorical_cols=["cat"],
+    )
+
+    pipeline = TransformPipeline(
+        transforms=[
+            DropMissingRows(),
+            ContinuousStandardScaler(),
+            CategoricalRepresentationTransform(representation_name="one_hot_representation"),
+        ]
+    )
+    dm = TabularDataModule(
+        df=df,
+        schema=schema,
+        transforms=pipeline,
+        unseen_category_policy="move_to_train",
+    )
+
+    dm.prepare_kfold(SplitConfigKFold(n_splits=2, shuffle=False, random_seed=None))
+    fold = dm.get_fold(1)
+
+    assert fold.train_raw is not None
+    assert fold.test_raw is not None
+    assert sorted(fold.train_raw["cat"].tolist()) == ["a", "a", "z"]
+    assert fold.test_raw["cat"].tolist() == ["a"]
+
+
+def test_holdout_moves_unseen_category_rows_to_train_when_policy_enabled():
+    df = pd.DataFrame(
+        {
+            "cat": ["a", "a", "a", "z", "a", "a"],
+            "cont": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "disc": [0, 1, 0, 1, 0, 1],
+        }
+    )
+    schema = TabularSchema(
+        continuous_cols=["cont"],
+        discrete_cols=["disc"],
+        categorical_cols=["cat"],
+    )
+
+    pipeline = TransformPipeline(
+        transforms=[
+            DropMissingRows(),
+            ContinuousStandardScaler(),
+            CategoricalRepresentationTransform(representation_name="one_hot_representation"),
+        ]
+    )
+    dm = TabularDataModule(
+        df=df,
+        schema=schema,
+        transforms=pipeline,
+        unseen_category_policy="move_to_train",
+    )
+
+    dm.prepare_holdout(SplitConfigHoldout(val_size=0.5, shuffle=False, random_seed=None))
+    holdout = dm.get_holdout()
+
+    assert holdout.train_raw is not None
+    assert holdout.val_raw is not None
+    assert sorted(holdout.train_raw["cat"].tolist()) == ["a", "a", "a", "z"]
+    assert holdout.val_raw["cat"].tolist() == ["a", "a"]
+
+
 def test_missing_rows_are_dropped_split_wise_in_holdout():
     df = pd.DataFrame(
         {
