@@ -876,8 +876,9 @@ def test_cli_routes_to_runtime_estimate_mode(monkeypatch, tmp_path):
     assert captured["device"] == "cpu"
 
 
-def test_drive_upload_failure_is_not_silently_marked_success(monkeypatch, tmp_path):
+def test_drive_upload_failure_is_reported_without_failing_runner(monkeypatch, tmp_path):
     progress_stream = StringIO()
+    calls = {"results_row": 0}
 
     class FakeDriveConfig:
         @staticmethod
@@ -895,25 +896,32 @@ def test_drive_upload_failure_is_not_silently_marked_success(monkeypatch, tmp_pa
     def fail_upload(**kwargs):
         raise RuntimeError("drive upload failed")
 
+    def fake_write_results_row(**kwargs):
+        calls["results_row"] += 1
+
     monkeypatch.setattr(drive_mod, "DriveConfig", FakeDriveConfig)
     monkeypatch.setattr(drive_mod, "DriveClient", FakeDriveClient)
     monkeypatch.setattr(drive_mod, "upload_experiment_artifacts", fail_upload)
+    monkeypatch.setattr(drive_mod, "write_results_row", fake_write_results_row)
 
-    try:
-        full_mod._maybe_upload_to_drive(
-            run_dir=tmp_path,
-            aggregate_metrics_path=tmp_path / "aggregate.json",
-            dataset_id="openml_adult",
-            dataset_label="adult",
-            encoding_method="one_hot_representation",
-            encoding_label="one-hot",
-            progress_stream=progress_stream,
-            progress_format="jsonl",
-        )
-    except RuntimeError as exc:
-        assert "drive upload failed" in str(exc)
-    else:
-        raise AssertionError("Expected configured Drive upload failure to propagate")
+    full_mod._maybe_upload_to_drive(
+        run_dir=tmp_path,
+        aggregate_metrics_path=tmp_path / "aggregate.json",
+        dataset_id="openml_adult",
+        dataset_label="adult",
+        encoding_method="one_hot_representation",
+        encoding_label="one-hot",
+        progress_stream=progress_stream,
+        progress_format="jsonl",
+    )
+
+    progress_messages = [
+        json.loads(line)["message"]
+        for line in progress_stream.getvalue().splitlines()
+        if line.strip()
+    ]
+    assert calls["results_row"] == 0
+    assert any("Drive upload failed" in message for message in progress_messages)
 
 
 def test_maybe_upload_to_drive_uses_model_display_name(monkeypatch, tmp_path):

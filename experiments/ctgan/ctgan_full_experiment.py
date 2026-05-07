@@ -978,9 +978,10 @@ def _maybe_upload_to_drive(
     """Upload artifacts to Google Drive and write a row in the Results sheet.
 
     No-ops when CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID is not set, so existing
-    pipelines without Drive configuration are unaffected. When Drive is
-    configured, failures propagate so the orchestrator does not mark a cell
-    done while Drive/Results saving failed.
+    pipelines without Drive configuration are unaffected. Drive/Results saving
+    is best-effort: completed local experiment artifacts remain valid even when
+    upload fails, and a separate refresh can upload or write missing Results
+    rows later.
     """
     try:
         from experiments.ctgan.orchestrator_staff.ctgan_drive import (
@@ -1046,7 +1047,17 @@ def _maybe_upload_to_drive(
         import traceback
         print(f"[ctgan_drive] WARNING: Drive upload failed: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        raise
+        _emit_progress(
+            stage="saving",
+            message=f"Drive upload failed; local artifacts remain at {run_dir}: {exc}",
+            progress_stream=progress_stream,
+            progress_format=progress_format,
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+            model_id=model_id,
+            model_name=model_name,
+        )
+        return
 
 
 if __name__ == "__main__":
