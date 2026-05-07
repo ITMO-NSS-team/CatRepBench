@@ -442,3 +442,134 @@ def test_recompute_pair_uses_tvae_artifact_filename(monkeypatch, tmp_path):
     )
 
     assert captured["folder"] == ("TVAE", "openml_adult", "one_hot_representation")
+
+
+def _done_payload(model_id: str = "ctgan") -> str:
+    return json.dumps(
+        {
+            "v": 1,
+            "status": "done",
+            "model_id": model_id,
+            "run_id": "run-1",
+            "owner": "host:pid:0",
+            "started_at": "2026-05-07T10:00:00Z",
+            "heartbeat_at": "2026-05-07T10:10:00Z",
+            "finished_at": "2026-05-07T10:11:00Z",
+            "stage": "done",
+            "note": "completed",
+        }
+    )
+
+
+class FakeWorksheet:
+    def __init__(self, values):
+        self.values = values
+
+    def get_all_values(self):
+        return self.values
+
+
+class FakeSpreadsheet:
+    def __init__(self, worksheets):
+        self.worksheets = worksheets
+
+    def worksheet(self, title):
+        if title not in self.worksheets:
+            raise RuntimeError(f"unknown worksheet: {title}")
+        return self.worksheets[title]
+
+
+def _write_completed_local_run(tmp_path: Path, *, model_id: str = "ctgan") -> Path:
+    run_dir = tmp_path / "results" / model_id / "openml_adult" / "one_hot_representation"
+    metrics_dir = run_dir / "metrics"
+    metrics_dir.mkdir(parents=True)
+    aggregate = {
+        "distribution": {
+            "wasserstein_mean_unencoded": {"mean": 1.0, "std": 0.1},
+            "marginal_kl_mean_unencoded": {"mean": 2.0, "std": 0.2},
+            "corr_frobenius_unencoded": {"mean": 3.0, "std": 0.3},
+        },
+        "tstr": {
+            "status": "ok",
+            "task_type": "classification",
+            "metrics": {"f1_weighted_pct_diff": {"mean": 4.0, "std": 0.4}},
+        },
+    }
+    (metrics_dir / "aggregate.json").write_text(json.dumps(aggregate), encoding="utf-8")
+    (run_dir / "run_summary.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
+    return run_dir
+
+
+def test_upload_missing_local_results_uploads_done_run_absent_from_results(monkeypatch, tmp_path):
+    manifest_path = _write_manifest(tmp_path)
+    _write_completed_local_run(tmp_path)
+    spreadsheet = FakeSpreadsheet(
+        {
+            "CTGAN": FakeWorksheet([["", "adult"], ["one-hot", _done_payload("ctgan")]]),
+            "Results": FakeWorksheet([recompute_mod.FULL_RESULTS_HEADERS]),
+        }
+    )
+    calls = {"uploads": [], "rows": []}
+
+    def fake_upload_artifacts(**kwargs):
+        calls["uploads"].append(kwargs)
+        return "https://drive.example/ctgan/adult/one-hot"
+
+    def fake_write_results_row(**kwargs):
+        calls["rows"].append(kwargs)
+
+    monkeypatch.setattr(recompute_mod.drive_mod, "upload_experiment_artifacts", fake_upload_artifacts)
+    monkeypatch.setattr(recompute_mod.drive_mod, "write_results_row", fake_write_results_row)
+
+    result = recompute_mod.upload_missing_local_results(
+        manifest_path=manifest_path,
+        local_results_root=tmp_path / "results",
+        drive_client=object(),
+        sheets_config=object(),
+        spreadsheet=spreadsheet,
+        status_worksheet="CTGAN",
+        results_worksheet="Results",
+    )
+
+    assert [item.dataset_id for item in result.uploaded] == ["openml_adult"]
+    assert result.skipped == []
+    assert len(calls["uploads"]) == 1
+    assert calls["uploads"][0]["model_name"] == "CTGAN"
+    assert calls["uploads"][0]["run_dir"] == tmp_path / "results" / "ctgan" / "openml_adult" / "one_hot_representation"
+    assert calls["rows"][0]["dataset_label"] == "adult"
+    assert calls["rows"][0]["encoding_label"] == "one-hot"
+    assert calls["rows"][0]["folder_url"] == "https://drive.example/ctgan/adult/one-hot"
+
+
+def test_upload_missing_local_results_skips_existing_results_row(monkeypatch, tmp_path):
+    manifest_path = _write_manifest(tmp_path)
+    _write_completed_local_run(tmp_path)
+    spreadsheet = FakeSpreadsheet(
+        {
+            "CTGAN": FakeWorksheet([["", "adult"], ["one-hot", _done_payload("ctgan")]]),
+            "Results": FakeWorksheet(
+                [
+                    recompute_mod.FULL_RESULTS_HEADERS,
+                    ["CTGAN", "adult", "one-hot", "", "", "", "", "", "", "", "", "", "https://drive.example/existing"],
+                ]
+            ),
+        }
+    )
+
+    def fail_upload(**kwargs):
+        raise AssertionError("existing Results row must not be uploaded again")
+
+    monkeypatch.setattr(recompute_mod.drive_mod, "upload_experiment_artifacts", fail_upload)
+
+    result = recompute_mod.upload_missing_local_results(
+        manifest_path=manifest_path,
+        local_results_root=tmp_path / "results",
+        drive_client=object(),
+        sheets_config=object(),
+        spreadsheet=spreadsheet,
+        status_worksheet="CTGAN",
+        results_worksheet="Results",
+    )
+
+    assert result.uploaded == []
+    assert [item["reason"] for item in result.skipped] == ["already present in Results"]
