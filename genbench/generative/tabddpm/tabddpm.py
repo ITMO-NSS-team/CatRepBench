@@ -108,8 +108,8 @@ class TabDDPMGenerative(BaseGenerative):
         Name identifier for the model.
     num_timesteps : int
         Number of diffusion timesteps (default: 1000).
-    num_epochs : int
-        Number of training epochs (default: 100).
+    num_steps : int
+        Number of training iterations (steps). (default: 5000).
     batch_size : int
         Batch size for training (default: 1024).
     lr : float
@@ -132,7 +132,7 @@ class TabDDPMGenerative(BaseGenerative):
 
     name: str = "tabddpm"
     num_timesteps: int = 1000
-    num_epochs: int = 100
+    num_steps: int = 5000
     batch_size: int = 1024
     lr: float = 0.002
     weight_decay: float = 1e-4
@@ -321,26 +321,20 @@ class TabDDPMGenerative(BaseGenerative):
         for param in self.ema_model_.parameters():
             param.detach_()
 
-        # Training loop
-        n_steps = self.num_epochs * (len(df) // self.batch_size + 1)
         step = 0
         self.loss_history_ = []
 
         # Create dataloader
         from torch.utils.data import TensorDataset, DataLoader
         dataset = TensorDataset(X)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            drop_last=False,
-        )
 
-        for epoch in range(self.num_epochs):
-            epoch_losses = []
-            epoch_multi_losses = []
-            epoch_gauss_losses = []
-
+        while step < self.num_steps:
+            dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                drop_last=False,
+            )
             for (batch_x,) in dataloader:
                 batch_x = batch_x.to(device)
 
@@ -357,7 +351,7 @@ class TabDDPMGenerative(BaseGenerative):
                 optimizer.step()
 
                 # Anneal learning rate
-                frac_done = step / n_steps
+                frac_done = step / self.num_steps
                 new_lr = self.lr * (1 - frac_done)
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = new_lr
@@ -368,30 +362,22 @@ class TabDDPMGenerative(BaseGenerative):
                     self.model_.parameters()
                 )
 
-                # Collect losses for averaging
-                epoch_losses.append(loss.item())
-                epoch_multi_losses.append(loss_multi.item())
-                epoch_gauss_losses.append(loss_gauss.item())
+                self.loss_history_.append({
+                    'step': step,
+                    'loss': loss.item(),
+                    'multinomial_loss': loss_multi.item(),
+                    'gaussian_loss': loss_gauss.item(),
+                })
+
+                if step % 500 == 0 or step == self.num_steps - 1:
+                    print(
+                        f"Step {step + 1}/{self.num_steps}, "
+                        f"Loss: {loss.item():.4f} "
+                        f"(multi: {loss_multi.item():.4f}, gauss: "
+                        f"{loss_gauss.item():.4f})"
+                    )
+
                 step += 1
-
-            # Compute epoch averages
-            avg_loss = np.mean(epoch_losses)
-            avg_multi = np.mean(epoch_multi_losses)
-            avg_gauss = np.mean(epoch_gauss_losses)
-
-            self.loss_history_.append({
-                'epoch': epoch + 1,
-                'loss': avg_loss,
-                'multinomial_loss': avg_multi,
-                'gaussian_loss': avg_gauss,
-            })
-
-            if (epoch + 1) % 10 == 0:
-                print(
-                    f"Epoch {epoch + 1}/{self.num_epochs}, "
-                    f"Loss: {avg_loss:.4f} "
-                    f"(multi: {avg_multi:.4f}, gauss: {avg_gauss:.4f})"
-                )
 
         # Use EMA model for sampling
         self.diffusion_._denoise_fn = self.ema_model_
@@ -511,7 +497,7 @@ class TabDDPMGenerative(BaseGenerative):
             name=self.name,
             params={
                 "num_timesteps": self.num_timesteps,
-                "num_epochs": self.num_epochs,
+                "num_steps": self.num_steps,
                 "batch_size": self.batch_size,
                 "lr": self.lr,
                 "weight_decay": self.weight_decay,
@@ -542,7 +528,7 @@ class TabDDPMGenerative(BaseGenerative):
         params = state.params or {}
         return cls(
             num_timesteps=params.get("num_timesteps", 1000),
-            num_epochs=params.get("num_epochs", 100),
+            num_steps=params.get("num_steps", 5000),
             batch_size=params.get("batch_size", 1024),
             lr=params.get("lr", 0.002),
             weight_decay=params.get("weight_decay", 1e-4),
