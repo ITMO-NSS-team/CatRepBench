@@ -1,6 +1,4 @@
 # Code sourced from https://github.com/yandex-research/tab-ddpm
-# NaN-safety improvements adapted from
-# https://github.com/vanderschaarlab/synthcity/pull/317
 
 import torch
 import torch.nn.functional as F
@@ -91,8 +89,6 @@ def ohe_to_categories(ohe, K):
     res = []
     for i in range(len(indices) - 1):
         res.append(ohe[:, indices[i]:indices[i + 1]].argmax(dim=1))
-    for i in range(len(res)):
-        res[i] = res[i].clamp(0, K[i] - 1)
     return torch.stack(res, dim=1)
 
 
@@ -131,8 +127,6 @@ def log_categorical(log_x_start, log_prob):
 def index_to_log_onehot(x, num_classes):
     onehots = []
     for i in range(len(num_classes)):
-        # clamp indices to keep them within the valid range
-        x_i = x[:, i].clamp(0, num_classes[i] - 1)
         onehots.append(F.one_hot(x[:, i], num_classes[i]))
 
     x_onehot = torch.cat(onehots, dim=1)
@@ -152,18 +146,9 @@ def log_sum_exp_by_classes(x, slices):
 
 
 @torch.jit.script
-def log_sub_exp(a: torch.Tensor, b: torch.Tensor,
-                epsilon: float = 1e-10) -> torch.Tensor:
+def log_sub_exp(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     m = torch.maximum(a, b)
-    # Compute the exponentials safely
-    exp_diff = torch.exp(a - m) - torch.exp(b - m)
-    # Ensure that exp_diff is greater than epsilon
-    exp_diff_clamped = torch.clamp(exp_diff, min=epsilon)
-    # Where a <= b, set the result to -inf or another appropriate value
-    valid = a > b
-    log_result = torch.log(exp_diff_clamped) + m
-    return torch.where(valid, log_result,
-                       torch.full_like(log_result, -float("inf")))
+    return torch.log(torch.exp(a - m) - torch.exp(b - m)) + m
 
 
 @torch.jit.script
@@ -188,7 +173,7 @@ def log_onehot_to_index(log_x):
     return log_x.argmax(1)
 
 
-class FoundNANsError(Exception):
+class FoundNANsError(BaseException):
     """Found NANs during sampling"""
 
     def __init__(self, message='Found NANs during sampling.'):

@@ -1,6 +1,4 @@
 # Code sourced from https://github.com/yandex-research/tab-ddpm
-# NaN-safety improvements adapted from
-# https://github.com/vanderschaarlab/synthcity/pull/317
 
 import torch.nn.functional as F
 import torch
@@ -379,10 +377,10 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         log_alpha_t = extract(self.log_alpha, t, log_x_t.shape)
         log_1_min_alpha_t = extract(self.log_1_min_alpha, t, log_x_t.shape)
 
-        # Clamp before log_add_exp to prevent numerical issues
+        # alpha_t * E[xt] + (1 - alpha_t) 1 / K
         log_probs = log_add_exp(
             log_x_t + log_alpha_t,
-            log_1_min_alpha_t - torch.log(self.num_classes_expanded + 1e-10)
+            log_1_min_alpha_t - torch.log(self.num_classes_expanded)
         )
 
         return log_probs
@@ -395,8 +393,7 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
 
         log_probs = log_add_exp(
             log_x_start + log_cumprod_alpha_t,
-            log_1_min_cumprod_alpha - torch.log(
-                self.num_classes_expanded + 1e-10)
+            log_1_min_cumprod_alpha - torch.log(self.num_classes_expanded)
         )
 
         return log_probs
@@ -475,12 +472,9 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         full_sample = []
         for i in range(len(self.num_classes)):
             one_class_logits = logits[:, self.slices_for_classes[i]]
-            # Clamp logits to prevent overflow in Gumbel noise
-            one_class_logits_clamped = torch.clamp(one_class_logits, max=50)
-            uniform = torch.rand_like(one_class_logits_clamped)
+            uniform = torch.rand_like(one_class_logits)
             gumbel_noise = -torch.log(-torch.log(uniform + 1e-30) + 1e-30)
-            sample = (gumbel_noise + one_class_logits_clamped).argmax(dim=1)
-            sample = sample.clamp(0, self.num_classes[i] - 1)
+            sample = (gumbel_noise + one_class_logits).argmax(dim=1)
             full_sample.append(sample.unsqueeze(1))
         full_sample = torch.cat(full_sample, dim=1)
         log_sample = index_to_log_onehot(full_sample, self.num_classes)
@@ -919,8 +913,7 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         sample = torch.cat([z_norm, z_cat], dim=1).cpu()
         return sample, out_dict
 
-    def sample_all(self, num_samples, batch_size, y_dist, ddim=False,
-                   max_total_attempts=10):
+    def sample_all(self, num_samples, batch_size, y_dist, ddim=False):
         if ddim:
             sample_fn = self.sample_ddim
         else:
@@ -931,37 +924,16 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         all_y = []
         all_samples = []
         num_generated = 0
-        total_attempts = 0
-
         while num_generated < num_samples:
-            if total_attempts >= max_total_attempts:
-                raise FoundNANsError(
-                    f"Exceeded maximum total attempts ({max_total_attempts}) "
-                    f"due to persistent NaN/Inf in generated batches."
-                )
-
             sample, out_dict = sample_fn(b, y_dist)
-            total_attempts += 1
-
-            mask_nan = torch.any(sample.isnan(), dim=1) | torch.any(
-                sample.isinf(), dim=1)
-            nan_count = mask_nan.sum().item()
-            if nan_count > 0:
-                print(
-                    f"[sample_all] Batch with {nan_count} NaN/Inf out of {b} "
-                    f"(attempt {total_attempts}/{max_total_attempts}, "
-                    f"generated so far: {num_generated}/{num_samples}) – "
-                    f"filtering them out"
-                )
-                sample = sample[~mask_nan]
-                out_dict['y'] = out_dict['y'][~mask_nan]
-
-            if sample.shape[0] == 0:
-                continue  # entire batch is bad - another attempt (if limit
-                # not exceeded)
+            mask_nan = torch.any(sample.isnan(), dim=1)
+            sample = sample[~mask_nan]
+            out_dict['y'] = out_dict['y'][~mask_nan]
 
             all_samples.append(sample)
             all_y.append(out_dict['y'].cpu())
+            if sample.shape[0] != b:
+                raise FoundNANsError
             num_generated += sample.shape[0]
 
         x_gen = torch.cat(all_samples, dim=0)[:num_samples]
