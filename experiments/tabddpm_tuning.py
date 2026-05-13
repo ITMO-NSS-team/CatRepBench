@@ -200,17 +200,71 @@ def _suggest_tabddpm_params(
 
 def _score_synthetic(
         *,
-        val_df: pd.DataFrame,
-        synth_df: pd.DataFrame,
-        schema: TabularSchema,
+        val_processed: pd.DataFrame,
+        synth_processed: pd.DataFrame,
+        schema_raw: TabularSchema,
+        pipeline: TransformPipeline,
+        transformed_schema: TabularSchema,
 ) -> tuple[float, Dict[str, float]]:
-    dist_pipeline = DistributionEvaluationPipeline(
-        metrics=[WassersteinDistanceMetric()])
-    dist_scores = dist_pipeline.evaluate(real=val_df, synth=synth_df,
-                                         schema=schema).scores
+    # Look for the fitted StandardScaler in the pipeline
+    scaler = None
+    for tr in pipeline.transforms:
+        if getattr(tr, 'name', '') == 'continuous_standard_scaler':
+            scaler = tr
+            break
 
-    wd = float(dist_scores.get("wasserstein_mean", np.nan))
-    details: Dict[str, float] = {
+    # Inverse-scale numerical features (if possible)
+    if scaler is not None and scaler.fitted_ and scaler.continuous_cols_:
+        val_raw = scaler.inverse_transform(val_processed)
+        synth_raw = scaler.inverse_transform(synth_processed)
+        metric_schema = schema_raw
+        print(
+            "    Tuning WD computed on raw (original) continuous features.")
+    else:
+        # No continuous columns or scaler not fitted - stay in transformed
+        # space
+        val_raw = val_processed
+        synth_raw = synth_processed
+        metric_schema = transformed_schema
+        print(
+            "    Tuning WD computed on transformed features (no continuous "
+            "scaler).")
+
+    # Cast categorical columns to str so that Corr dist (and potentially
+    # other metrics) doesn't break
+    for col in schema_raw.categorical_cols:
+        if col in val_raw.columns and col in synth_raw.columns:
+            val_raw[col] = val_raw[col].astype(str)
+            synth_raw[col] = synth_raw[col].astype(str)
+
+    # WD on continuous features only
+    wd_cols = metric_schema.continuous_cols
+    if wd_cols:
+        schema_wd = TabularSchema(
+            continuous_cols=wd_cols,
+            discrete_cols=[],
+            categorical_cols=[],
+        )
+        dist_pipeline = DistributionEvaluationPipeline(
+            metrics=[WassersteinDistanceMetric()]
+        )
+        dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
+                                             schema=schema_wd).scores
+        wd = float(dist_scores.get("wasserstein_mean", np.nan))
+    else:
+        # Fallback to all features so that tuning doesn't fail for datasets
+        # without continuous columns
+        print(
+            "    No continuous columns; falling back to all features for "
+            "tuning WD.")
+        dist_pipeline = DistributionEvaluationPipeline(
+            metrics=[WassersteinDistanceMetric()]
+        )
+        dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
+                                             schema=metric_schema).scores
+        wd = float(dist_scores.get("wasserstein_mean", np.nan))
+
+    details = {
         "objective_score": wd,
         "wasserstein_mean": wd,
     }
@@ -224,7 +278,8 @@ def _build_holdout(
         encoding_method: str,
         task_type: Optional[str],
         holdout_cfg: SplitConfigHoldout,
-) -> tuple[pd.DataFrame, pd.DataFrame, TabularSchema, Dict[str, Any]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, TabularSchema, Dict[
+    str, Any], TransformPipeline]:
     pipeline, representation_name = _build_preprocess_pipeline(
         schema=schema,
         encoding_method=encoding_method,
@@ -267,6 +322,14 @@ def _build_holdout(
         target_col=schema.target_col,
         id_col=schema.id_col,
     )
+    if not is_regression and transformed_schema.target_col is not None:
+        target = transformed_schema.target_col
+        if target in transformed_schema.continuous_cols:
+            transformed_schema.continuous_cols.remove(target)
+        if target in transformed_schema.discrete_cols:
+            transformed_schema.discrete_cols.remove(target)
+        if target not in transformed_schema.categorical_cols:
+            transformed_schema.categorical_cols.append(target)
     transformed_schema.validate(val_df)
     discrete_threshold = int(target_state.get("discrete_unique_threshold", 20))
     target_encoded = bool(target_state.get("did_encode", False))
@@ -290,7 +353,15 @@ def _build_holdout(
         },
         "discrete_unique_threshold": discrete_threshold,
     }
-    return train_df, val_df, transformed_schema, preprocessing_meta
+    # Use the fitted pipeline from holdout
+    trained_pipeline = holdout.transforms
+    # If holdout.transforms is not a TransformPipeline,
+    # fit a copy of the original pipeline on train_df
+    if not isinstance(trained_pipeline, TransformPipeline):
+        trained_pipeline = TransformPipeline(transforms=pipeline.transforms)
+        trained_pipeline.fit(train_df, schema)
+    return (train_df, val_df, transformed_schema, preprocessing_meta,
+            trained_pipeline)
 
 
 def tune_tabddpm(
@@ -325,13 +396,14 @@ def tune_tabddpm(
             encoding_method))
     cfg = holdout_cfg or SplitConfigHoldout(val_size=0.2, shuffle=True,
                                             random_seed=5)
-    train_df, val_df, transformed_schema, preprocessing_meta = _build_holdout(
-        df=df,
-        schema=schema,
-        encoding_method=encoding_method,
-        task_type=task_type,
-        holdout_cfg=cfg,
-    )
+    train_df, val_df, transformed_schema, preprocessing_meta, pipeline = (
+        _build_holdout(
+            df=df,
+            schema=schema,
+            encoding_method=encoding_method,
+            task_type=task_type,
+            holdout_cfg=cfg,
+        ))
     is_regression = bool(
         preprocessing_meta["target_processing"]["is_regression"])
 
@@ -352,12 +424,14 @@ def tune_tabddpm(
             model.fit(train_df, transformed_schema, source_schema=schema)
             synth_df = model.sample(len(val_df))
             score, details = _score_synthetic(
-                val_df=val_df,
-                synth_df=synth_df,
-                schema=transformed_schema,
+                val_processed=val_df,
+                synth_processed=synth_df,
+                schema_raw=schema,  # original schema
+                pipeline=pipeline,
+                transformed_schema=transformed_schema,
             )
             if not np.isfinite(score):
-                raise optuna.TrialPruned("Non‑finite score.")
+                raise optuna.TrialPruned("Non-finite score.")
             trial.set_user_attr("objective_metric", "wasserstein_mean")
             trial.set_user_attr("sample_size", int(len(val_df)))
             trial.set_user_attr("details", details)
@@ -368,13 +442,23 @@ def tune_tabddpm(
             raise optuna.TrialPruned(f"Trial failed: {exc}") from exc
 
     started_at = time.time()
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        timeout=timeout_seconds,
-        n_jobs=1,
-        show_progress_bar=False,
+    successful = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
     )
+    while successful < n_trials:
+        # Run one trial at a time so we can check immediately when the
+        # target is reached
+        study.optimize(
+            objective,
+            n_trials=1,
+            timeout=timeout_seconds,
+            n_jobs=1,
+            show_progress_bar=False,
+        )
+        successful = sum(
+            1 for t in study.trials if
+            t.state == optuna.trial.TrialState.COMPLETE
+        )
     duration_seconds = time.time() - started_at
 
     if study.best_trial is None:
