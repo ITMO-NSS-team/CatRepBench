@@ -17,11 +17,17 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import experiments.ctgan.ctgan_full_experiment as full_mod
+from experiments.ctgan.experiment_models import ExperimentModelSpec, get_experiment_model
+from experiments.ctgan.orchestrator_staff import ctgan_drive as drive_mod
 from experiments.ctgan.orchestrator_staff.ctgan_manifest import (
     CtganManifest,
     DatasetEntry,
     EncodingEntry,
     load_ctgan_manifest,
+)
+from experiments.ctgan.orchestrator_staff.ctgan_orchestrator_state import (
+    parse_cell_payload,
+    validate_worksheet_headers,
 )
 from experiments.ctgan.orchestrator_staff.ctgan_sheets import SheetsConfig
 from genbench.data.datamodule import TabularDataModule
@@ -32,6 +38,7 @@ from genbench.evaluation.distribution.marginal_kl import MarginalKLDivergenceMet
 from genbench.evaluation.distribution.wasserstein import WassersteinDistanceMetric
 from genbench.evaluation.pipeline.single_run import DistributionEvaluationPipeline
 from genbench.generative.ctgan.ctgan import CtganGenerative
+from genbench.generative.tvae.tvae import TvaeGenerative
 
 
 DEFAULT_MANIFEST = Path("experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json")
@@ -415,6 +422,22 @@ class RecomputeFromDriveResult:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class UploadedLocalPair:
+    dataset_id: str
+    encoding_id: str
+    run_dir: Path
+    aggregate_metrics_path: Path
+    folder_url: str
+    row: list[str]
+
+
+@dataclass(frozen=True)
+class UploadMissingLocalResult:
+    uploaded: list[UploadedLocalPair] = field(default_factory=list)
+    skipped: list[dict[str, str]] = field(default_factory=list)
+
+
 def _parse_drive_modified_time(value: str) -> datetime:
     if not value:
         return datetime.fromtimestamp(0, tz=timezone.utc)
@@ -537,6 +560,91 @@ def build_results_sheet_row(
         folder_url,
     ]
     return [_format_sheet_value(value) for value in row]
+
+
+def _worksheet_values(spreadsheet: Any, worksheet_name: str) -> list[list[str]]:
+    worksheet = spreadsheet.worksheet(worksheet_name)
+    values = worksheet.get_all_values()
+    if not isinstance(values, list):
+        raise ValueError(f"worksheet {worksheet_name!r} must return a matrix.")
+    return values
+
+
+def _results_row_keys(matrix: list[list[str]]) -> set[tuple[str, str, str]]:
+    if not matrix:
+        return set()
+    header = matrix[0]
+    if not isinstance(header, list):
+        return set()
+    if all(column in header for column in ("Model", "Dataset", "Categorical representation")):
+        model_idx = header.index("Model")
+        dataset_idx = header.index("Dataset")
+        encoding_idx = header.index("Categorical representation")
+    else:
+        model_idx, dataset_idx, encoding_idx = 0, 1, 2
+
+    keys: set[tuple[str, str, str]] = set()
+    for row in matrix[1:]:
+        if not isinstance(row, list):
+            continue
+        if len(row) <= max(model_idx, dataset_idx, encoding_idx):
+            continue
+        key = (
+            row[model_idx].strip(),
+            row[dataset_idx].strip(),
+            row[encoding_idx].strip(),
+        )
+        if all(key):
+            keys.add(key)
+    return keys
+
+
+def _done_status_pairs(
+    *,
+    matrix: list[list[str]],
+    manifest: CtganManifest,
+    model_id: str,
+) -> list[tuple[DatasetEntry, EncodingEntry]]:
+    if not matrix:
+        return []
+    header_row = matrix[0]
+    if not isinstance(header_row, list):
+        raise ValueError("status worksheet header row must be a list.")
+
+    dataset_headers, encoding_headers = validate_worksheet_headers(
+        dataset_headers=header_row[1:],
+        encoding_headers=[row[0] if isinstance(row, list) and row else "" for row in matrix[1:]],
+        manifest_dataset_labels=[entry.label for entry in manifest.datasets],
+        manifest_encoding_labels=[entry.label for entry in manifest.encodings],
+    )
+
+    done_pairs: list[tuple[DatasetEntry, EncodingEntry]] = []
+    for row_index, encoding_label in enumerate(encoding_headers, start=1):
+        row = matrix[row_index] if row_index < len(matrix) and isinstance(matrix[row_index], list) else []
+        for col_index, dataset_label in enumerate(dataset_headers, start=1):
+            raw_value = row[col_index] if col_index < len(row) else None
+            payload = parse_cell_payload(raw_value)
+            if payload.status != "done":
+                continue
+            if payload.model_id not in {None, model_id}:
+                continue
+            done_pairs.append(
+                (
+                    manifest.resolve_dataset_label(dataset_label),
+                    manifest.resolve_encoding_label(encoding_label),
+                )
+            )
+    return done_pairs
+
+
+def _missing_local_run_reason(run_dir: Path) -> str | None:
+    if not run_dir.is_dir():
+        return f"local run directory not found: {run_dir}"
+    if not (run_dir / "run_summary.json").is_file():
+        return f"run_summary.json not found in {run_dir}"
+    if not (run_dir / "metrics" / "aggregate.json").is_file():
+        return f"metrics/aggregate.json not found in {run_dir}"
+    return None
 
 
 def _update_worksheet_values(worksheet: Any, values: list[list[str]]) -> None:
@@ -775,9 +883,19 @@ def _valid_json_file(path: Path) -> bool:
     return True
 
 
-def _valid_ctgan_artifact(path: Path) -> bool:
-    _load_ctgan_artifacts_cpu(path.parent)
+def _valid_model_artifact(
+    path: Path,
+    artifact_filename: str = "ctgan.pkl",
+    model_spec: ExperimentModelSpec | None = None,
+) -> bool:
+    if path.name != artifact_filename or not path.exists() or path.stat().st_size <= 0:
+        return False
+    _load_model_artifacts_cpu(path.parent, model_spec or get_experiment_model("ctgan"))
     return True
+
+
+def _valid_ctgan_artifact(path: Path) -> bool:
+    return _valid_model_artifact(path, "ctgan.pkl", get_experiment_model("ctgan"))
 
 
 def _torch_load_cpu_from_bytes(buffer: bytes) -> Any:
@@ -794,10 +912,14 @@ def _torch_load_cpu_from_bytes(buffer: bytes) -> Any:
 
 
 def _load_ctgan_artifacts_cpu(path: Path) -> CtganGenerative:
+    return _load_model_artifacts_cpu(path, get_experiment_model("ctgan"))
+
+
+def _load_model_artifacts_cpu(path: Path, model_spec: ExperimentModelSpec) -> Any:
     path = path.resolve()
-    bundle_path = path / "ctgan.pkl"
+    bundle_path = path / model_spec.artifact_filename
     if not bundle_path.exists():
-        raise FileNotFoundError(f"ctgan.pkl not found in {path}")
+        raise FileNotFoundError(f"{model_spec.artifact_filename} not found in {path}")
 
     patched = False
     original_load_from_bytes: Any | None = None
@@ -818,7 +940,13 @@ def _load_ctgan_artifacts_cpu(path: Path) -> CtganGenerative:
         if patched:
             torch.storage._load_from_bytes = original_load_from_bytes  # type: ignore[union-attr]
 
-    obj = CtganGenerative()
+    if model_spec.model_id == "ctgan":
+        obj: Any = CtganGenerative()
+    elif model_spec.model_id == "tvae":
+        obj = TvaeGenerative()
+    else:
+        raise ValueError(f"Unsupported recompute model_id: {model_spec.model_id}")
+
     obj.model_ = payload.get("model")
     obj.used_discrete_cols_ = payload.get("used_discrete_cols", [])
     obj.fitted_ = bool(payload.get("fitted", obj.model_ is not None))
@@ -908,8 +1036,9 @@ def _evaluate_saved_model_fold(
     model_dir: Path,
     is_regression: bool | None,
     source_model_record: DriveFileRecord,
+    model_spec: ExperimentModelSpec | None = None,
 ) -> dict[str, Any]:
-    model = _load_ctgan_artifacts_cpu(model_dir)
+    model = _load_model_artifacts_cpu(model_dir, model_spec or get_experiment_model("ctgan"))
     synth_df = model.sample(len(split_data.train_transformed)).reset_index(drop=True)
 
     distribution_scores = _compute_distribution_scores(
@@ -1038,10 +1167,13 @@ def _recompute_pair_from_drive(
     encoding: EncodingEntry,
     output_root: Path,
     drive_client: Any,
-    model_name: str,
     random_seed: int,
+    model_id: str = "ctgan",
+    model_name: str | None = None,
 ) -> RecomputedPair | None:
-    folder_id = drive_client.find_folder_path(model_name, dataset.dataset_id, encoding.encoding_id)
+    model_spec = get_experiment_model(model_id)
+    display_name = model_name or model_spec.display_name
+    folder_id = drive_client.find_folder_path(display_name, dataset.dataset_id, encoding.encoding_id)
     if folder_id is None:
         return None
 
@@ -1073,17 +1205,21 @@ def _recompute_pair_from_drive(
     fold_results: list[dict[str, Any]] = []
     model_file_records: list[dict[str, str]] = []
     for fold_id in range(n_folds):
-        logical_path = f"artifacts/fold_{fold_id}/ctgan.pkl"
+        logical_path = f"artifacts/fold_{fold_id}/{model_spec.artifact_filename}"
         candidates = records_by_path.get(logical_path, [])
         if not candidates:
             return None
 
-        local_model_path = run_dir / "artifacts" / f"fold_{fold_id}" / "ctgan.pkl"
+        local_model_path = run_dir / "artifacts" / f"fold_{fold_id}" / model_spec.artifact_filename
         selected_model_record = download_first_valid_drive_file(
             drive_client=drive_client,
             candidates=candidates,
             destination=local_model_path,
-            validator=_valid_ctgan_artifact,
+            validator=lambda path: _valid_model_artifact(
+                path,
+                model_spec.artifact_filename,
+                model_spec,
+            ),
         )
         model_file_records.append(
             {
@@ -1108,6 +1244,7 @@ def _recompute_pair_from_drive(
             split_data=split_data,
             schema=schema,
             model_dir=local_model_path.parent,
+            model_spec=model_spec,
             is_regression=is_regression,
             source_model_record=selected_model_record,
         )
@@ -1154,7 +1291,7 @@ def _recompute_pair_from_drive(
     full_mod._save_json(run_dir / "run_summary.json", local_summary)
 
     row = build_results_sheet_row(
-        model_name=model_name,
+        model_name=display_name,
         dataset_label=dataset.label,
         dataset_id=dataset.dataset_id,
         encoding_label=encoding.label,
@@ -1177,6 +1314,7 @@ def recompute_all_from_drive(
     output_root: Path | str = DEFAULT_OUTPUT_ROOT,
     drive_client: Any | None = None,
     sheets_config: Any | None = None,
+    model_id: str = "ctgan",
     model_name: str = "CTGAN",
     results_worksheet: str = "Results",
     archive_existing_results: bool = True,
@@ -1187,6 +1325,8 @@ def recompute_all_from_drive(
     output_root = Path(output_root)
     project_root = full_mod._infer_project_root(manifest_path)
     manifest = _load_manifest_in_json_order(manifest_path, project_root=project_root)
+    model_spec = get_experiment_model(model_id)
+    effective_model_name = model_name if model_spec.model_id == "ctgan" else model_spec.display_name
     drive = drive_client if drive_client is not None else LocalDriveReader(LocalDriveConfig.from_env())
     sheet_writer: IncrementalResultsWorksheetWriter | None = None
     if write_sheet:
@@ -1208,7 +1348,7 @@ def recompute_all_from_drive(
         for encoding in manifest.encodings:
             print(
                 "[ctgan_recompute_from_drive] scanning "
-                f"{model_name}/{dataset.dataset_id}/{encoding.encoding_id}",
+                f"{effective_model_name}/{dataset.dataset_id}/{encoding.encoding_id}",
                 flush=True,
             )
             try:
@@ -1219,7 +1359,8 @@ def recompute_all_from_drive(
                     encoding=encoding,
                     output_root=output_root,
                     drive_client=drive,
-                    model_name=model_name,
+                    model_id=model_spec.model_id,
+                    model_name=effective_model_name,
                     random_seed=random_seed,
                 )
             except FileNotFoundError as exc:
@@ -1263,6 +1404,144 @@ def recompute_all_from_drive(
     return RecomputeFromDriveResult(rows=rows, pairs=pairs, skipped=skipped)
 
 
+def upload_missing_local_results(
+    *,
+    manifest_path: Path | str = DEFAULT_MANIFEST,
+    local_results_root: Path | str = Path("experiments/results"),
+    drive_client: Any | None = None,
+    sheets_config: Any | None = None,
+    spreadsheet: Any | None = None,
+    model_id: str = "ctgan",
+    model_name: str = "CTGAN",
+    status_worksheet: str | None = None,
+    results_worksheet: str = "Results",
+    dry_run: bool = False,
+) -> UploadMissingLocalResult:
+    """Upload completed local runs that are missing from the Results worksheet.
+
+    The status worksheet (for example ``CTGAN`` or ``TVAE``) is treated as the
+    source of truth for completed experiments. A run is uploaded only when its
+    cell is ``done`` and the full Results sheet does not already contain the
+    same ``(Model, Dataset, Categorical representation)`` row.
+    """
+    manifest_path = Path(manifest_path).resolve()
+    local_results_root = Path(local_results_root)
+    project_root = full_mod._infer_project_root(manifest_path)
+    manifest = _load_manifest_in_json_order(manifest_path, project_root=project_root)
+    model_spec = get_experiment_model(model_id)
+    effective_model_name = model_name if model_spec.model_id == "ctgan" else model_spec.display_name
+    effective_status_worksheet = status_worksheet or effective_model_name
+
+    config = sheets_config if sheets_config is not None else SheetsConfig.from_env()
+    active_spreadsheet = spreadsheet if spreadsheet is not None else _build_spreadsheet_from_config(config)
+    status_matrix = _worksheet_values(active_spreadsheet, effective_status_worksheet)
+    try:
+        results_matrix = _worksheet_values(active_spreadsheet, results_worksheet)
+    except Exception:  # noqa: BLE001 - write_results_row can create a fresh Results sheet/header
+        results_matrix = []
+    existing_result_keys = _results_row_keys(results_matrix)
+
+    drive = drive_client if drive_client is not None else drive_mod.DriveClient(drive_mod.DriveConfig.from_env())
+    uploaded: list[UploadedLocalPair] = []
+    skipped: list[dict[str, str]] = []
+
+    for dataset, encoding in _done_status_pairs(
+        matrix=status_matrix,
+        manifest=manifest,
+        model_id=model_spec.model_id,
+    ):
+        result_key = (effective_model_name, dataset.label, encoding.label)
+        skip_base = {
+            "dataset_id": dataset.dataset_id,
+            "encoding_id": encoding.encoding_id,
+        }
+        if result_key in existing_result_keys:
+            skipped.append({**skip_base, "reason": "already present in Results"})
+            continue
+
+        run_dir = local_results_root / model_spec.model_id / dataset.dataset_id / encoding.encoding_id
+        missing_reason = _missing_local_run_reason(run_dir)
+        if missing_reason is not None:
+            skipped.append({**skip_base, "reason": missing_reason})
+            continue
+
+        aggregate_path = run_dir / "metrics" / "aggregate.json"
+        aggregate = _load_json_file(aggregate_path)
+        row = build_results_sheet_row(
+            model_name=effective_model_name,
+            dataset_label=dataset.label,
+            dataset_id=dataset.dataset_id,
+            encoding_label=encoding.label,
+            encoding_id=encoding.encoding_id,
+            aggregate=aggregate,
+            folder_url="",
+        )
+        if dry_run:
+            skipped.append({**skip_base, "reason": "dry-run"})
+            print(
+                "[ctgan_recompute_from_drive] would upload local "
+                f"{effective_model_name}/{dataset.dataset_id}/{encoding.encoding_id}",
+                flush=True,
+            )
+            continue
+
+        try:
+            folder_url = drive_mod.upload_experiment_artifacts(
+                drive_client=drive,
+                run_dir=run_dir,
+                model_name=effective_model_name,
+                dataset_id=dataset.dataset_id,
+                encoding_method=encoding.encoding_id,
+            )
+            drive_mod.write_results_row(
+                sheets_config=config,
+                aggregate_metrics_path=aggregate_path,
+                model_name=effective_model_name,
+                dataset_label=dataset.label,
+                dataset_id=dataset.dataset_id,
+                encoding_label=encoding.label,
+                encoding_id=encoding.encoding_id,
+                folder_url=folder_url,
+                results_worksheet_name=results_worksheet,
+            )
+        except Exception as exc:  # noqa: BLE001 - continue scanning remaining completed runs
+            skipped.append({**skip_base, "reason": str(exc)})
+            print(
+                "[ctgan_recompute_from_drive] failed to upload local "
+                f"{effective_model_name}/{dataset.dataset_id}/{encoding.encoding_id}: {exc}",
+                flush=True,
+            )
+            continue
+
+        row = build_results_sheet_row(
+            model_name=effective_model_name,
+            dataset_label=dataset.label,
+            dataset_id=dataset.dataset_id,
+            encoding_label=encoding.label,
+            encoding_id=encoding.encoding_id,
+            aggregate=aggregate,
+            folder_url=folder_url,
+        )
+        uploaded.append(
+            UploadedLocalPair(
+                dataset_id=dataset.dataset_id,
+                encoding_id=encoding.encoding_id,
+                run_dir=run_dir,
+                aggregate_metrics_path=aggregate_path,
+                folder_url=folder_url,
+                row=row,
+            )
+        )
+        existing_result_keys.add(result_key)
+        print(
+            "[ctgan_recompute_from_drive] uploaded local "
+            f"{effective_model_name}/{dataset.dataset_id}/{encoding.encoding_id}",
+            flush=True,
+        )
+
+    return UploadMissingLocalResult(uploaded=uploaded, skipped=skipped)
+
+
 def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv
@@ -1277,24 +1556,46 @@ def _load_dotenv() -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Recompute CTGAN metrics from saved Google Drive ctgan.pkl artifacts."
+        description="Recompute model metrics from saved Google Drive artifacts."
     )
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
+    parser.add_argument("--model-id", default="ctgan")
     parser.add_argument("--model-name", default="CTGAN")
+    parser.add_argument("--status-worksheet")
     parser.add_argument("--results-worksheet", default="Results")
     parser.add_argument("--archive-existing-results", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    parser.add_argument("--local-results-root", default="experiments/results")
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--no-write-sheet", action="store_true")
+    parser.add_argument("--upload-missing-local", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     _load_dotenv()
     args = build_arg_parser().parse_args(argv)
+    if args.upload_missing_local:
+        result = upload_missing_local_results(
+            manifest_path=args.manifest,
+            local_results_root=args.local_results_root,
+            model_id=args.model_id,
+            model_name=args.model_name,
+            status_worksheet=args.status_worksheet,
+            results_worksheet=args.results_worksheet,
+            dry_run=args.dry_run,
+        )
+        print(
+            "[ctgan_recompute_from_drive] "
+            f"uploaded {len(result.uploaded)} local pair(s), skipped {len(result.skipped)} pair(s)"
+        )
+        return 0
+
     result = recompute_all_from_drive(
         manifest_path=args.manifest,
         output_root=args.output_root,
+        model_id=args.model_id,
         model_name=args.model_name,
         results_worksheet=args.results_worksheet,
         archive_existing_results=args.archive_existing_results,

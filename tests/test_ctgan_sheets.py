@@ -122,6 +122,25 @@ def test_retry_call_uses_full_retry_schedule_before_raising():
     assert sleeps == [1, 2, 4, 8, 16]
 
 
+def test_retry_call_keeps_waiting_for_sheets_quota_errors(monkeypatch):
+    monkeypatch.delenv("CATREPBENCH_GSHEETS_QUOTA_RETRY_SECONDS", raising=False)
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def quota_then_ok():
+        calls["n"] += 1
+        if calls["n"] <= 6:
+            raise RuntimeError(
+                "APIError: [429]: Quota exceeded for quota metric 'Read requests'"
+            )
+        return "ok"
+
+    assert retry_call(quota_then_ok, sleep=sleeps.append) == "ok"
+
+    assert calls["n"] == 7
+    assert sleeps == [75, 75, 75, 75, 75, 75]
+
+
 def test_results_sheet_writer_uses_unencoded_distribution_metrics(tmp_path, monkeypatch):
     aggregate_path = tmp_path / "aggregate.json"
     aggregate_path.write_text(

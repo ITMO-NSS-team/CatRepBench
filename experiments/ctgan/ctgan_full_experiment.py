@@ -19,6 +19,7 @@ from experiments.ctgan.ctgan_common import (
     build_preprocess_pipeline,
     default_discrete_cols,
 )
+from experiments.ctgan.experiment_models import ExperimentModelSpec, get_experiment_model
 from experiments.ctgan.orchestrator_staff.ctgan_runtime_env import prepare_runtime_env
 from experiments.ctgan.orchestrator_staff.ctgan_manifest import load_ctgan_manifest
 from experiments.ctgan.ctgan_tuning import estimate_ctgan_runtime, select_ctgan_best_params
@@ -41,6 +42,26 @@ def tstr_catboost(**kwargs: Any) -> dict[str, float]:
 
 def infer_is_regression_target(*args: Any, **kwargs: Any) -> bool:
     return _infer_is_regression_target(*args, **kwargs)
+
+
+def _create_ctgan_from_runner_globals(discrete_cols: list[str], model_kwargs: dict[str, Any]) -> Any:
+    return CtganGenerative(discrete_cols=discrete_cols, ctgan_kwargs=model_kwargs)
+
+
+def _get_runner_model_spec(model_id: str) -> ExperimentModelSpec:
+    spec = get_experiment_model(model_id)
+    if spec.model_id != "ctgan":
+        return spec
+    return ExperimentModelSpec(
+        model_id=spec.model_id,
+        display_name=spec.display_name,
+        artifact_filename=spec.artifact_filename,
+        default_epochs=spec.default_epochs,
+        build_model_kwargs=build_ctgan_kwargs,
+        create_generative=_create_ctgan_from_runner_globals,
+        select_best_params=select_ctgan_best_params,
+        estimate_runtime=estimate_ctgan_runtime,
+    )
 
 
 @dataclass(frozen=True)
@@ -127,6 +148,8 @@ def _emit_progress(
     progress_format: str,
     dataset_id: str,
     encoding_method: str,
+    model_id: str = "ctgan",
+    model_name: str = "CTGAN",
 ) -> None:
     if progress_format != "jsonl":
         raise ValueError("progress_format must be 'jsonl'.")
@@ -137,6 +160,8 @@ def _emit_progress(
         "message": message,
         "dataset_id": dataset_id,
         "encoding_method": encoding_method,
+        "model_id": model_id,
+        "model_name": model_name,
     }
     stream.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
     stream.flush()
@@ -379,12 +404,13 @@ def _save_model_artifacts(model: Any, artifacts_dir: Path, split_id: int) -> Non
     try:
         loss_history = model.get_loss_history()
         if loss_history:
-            rows = [
-                {"epoch": i, "generator_loss": g, "discriminator_loss": d}
-                for i, (g, d) in enumerate(
-                    zip(loss_history["generator_loss"], loss_history["discriminator_loss"])
-                )
-            ]
+            max_len = max(len(values) for values in loss_history.values())
+            rows = []
+            for epoch in range(max_len):
+                row = {"epoch": epoch}
+                for key, values in loss_history.items():
+                    row[key] = values[epoch] if epoch < len(values) else None
+                rows.append(row)
             pd.DataFrame(rows).to_csv(fold_dir / "loss_history.csv", index=False)
     except Exception:
         pass
@@ -396,17 +422,22 @@ def _evaluate_prepared_split(
     split_data: PreparedFoldData,
     schema: TabularSchema,
     best_params: dict[str, Any],
+    model_spec: ExperimentModelSpec,
     device: str,
     is_regression: bool | None,
     artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
-    ctgan_kwargs = build_ctgan_kwargs(best_params, epochs=DEFAULT_CTGAN_EPOCHS, device=device)
+    model_kwargs = model_spec.build_model_kwargs(
+        best_params,
+        epochs=model_spec.default_epochs,
+        device=device,
+    )
     discrete_cols = default_discrete_cols(
         schema=split_data.transformed_schema,
         train_df=split_data.train_transformed,
         include_target_for_classification=(is_regression is False),
     )
-    model = CtganGenerative(discrete_cols=discrete_cols, ctgan_kwargs=ctgan_kwargs)
+    model = model_spec.create_generative(discrete_cols, model_kwargs)
     model.fit(split_data.train_transformed, split_data.transformed_schema)
 
     if artifacts_dir is not None:
@@ -453,6 +484,7 @@ def _run_crossval_fold(
     schema: TabularSchema,
     encoding_method: str,
     best_params: dict[str, Any],
+    model_spec: ExperimentModelSpec,
     device: str,
     is_regression: bool | None,
     artifacts_dir: Path | None = None,
@@ -471,6 +503,7 @@ def _run_crossval_fold(
         split_data=fold_data,
         schema=schema,
         best_params=best_params,
+        model_spec=model_spec,
         device=device,
         is_regression=is_regression,
         artifacts_dir=artifacts_dir,
@@ -483,6 +516,7 @@ def _run_holdout_split(
     schema: TabularSchema,
     encoding_method: str,
     best_params: dict[str, Any],
+    model_spec: ExperimentModelSpec,
     device: str,
     is_regression: bool | None,
     artifacts_dir: Path | None = None,
@@ -498,6 +532,7 @@ def _run_holdout_split(
         split_data=holdout_data,
         schema=schema,
         best_params=best_params,
+        model_spec=model_spec,
         device=device,
         is_regression=is_regression,
         artifacts_dir=artifacts_dir,
@@ -510,6 +545,7 @@ def run_ctgan_runtime_estimate(
     dataset_id: str,
     dataset_label: str,
     encoding_method: str,
+    model_id: str = "ctgan",
     output_root: Path | str = Path("experiments/results"),
     progress_stream: TextIO | None = None,
     progress_format: str = "jsonl",
@@ -521,7 +557,11 @@ def run_ctgan_runtime_estimate(
 ):
     manifest_path = Path(manifest_path).resolve()
     project_root = _infer_project_root(manifest_path)
-    output_dir = _ensure_dir(Path(output_root) / "ctgan" / dataset_id / encoding_method / "runtime_estimate")
+    model_spec = _get_runner_model_spec(model_id)
+    progress_model = {"model_id": model_spec.model_id, "model_name": model_spec.display_name}
+    output_dir = _ensure_dir(
+        Path(output_root) / model_spec.model_id / dataset_id / encoding_method / "runtime_estimate"
+    )
 
     _emit_progress(
         stage="launching",
@@ -530,6 +570,7 @@ def run_ctgan_runtime_estimate(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        **progress_model,
     )
 
     manifest = load_ctgan_manifest(manifest_path, project_root=project_root)
@@ -565,10 +606,11 @@ def run_ctgan_runtime_estimate(
             progress_format=progress_format,
             dataset_id=dataset_id,
             encoding_method=encoding_method,
+            **progress_model,
         )
 
-    emit_estimate_progress("estimating representative ctgan runtime")
-    result = estimate_ctgan_runtime(
+    emit_estimate_progress(f"estimating representative {model_spec.display_name.lower()} runtime")
+    result = model_spec.estimate_runtime(
         df=df,
         schema=schema,
         dataset=dataset.label,
@@ -589,6 +631,7 @@ def run_ctgan_runtime_estimate(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        **progress_model,
     )
     return result
 
@@ -599,6 +642,7 @@ def run_full_ctgan_experiment(
     dataset_id: str,
     dataset_label: str,
     encoding_method: str,
+    model_id: str = "ctgan",
     output_root: Path | str = Path("experiments/results"),
     progress_stream: TextIO | None = None,
     progress_format: str = "jsonl",
@@ -610,7 +654,9 @@ def run_full_ctgan_experiment(
 ) -> FullCtganExperimentResult:
     manifest_path = Path(manifest_path).resolve()
     project_root = _infer_project_root(manifest_path)
-    run_dir = _ensure_dir(Path(output_root) / "ctgan" / dataset_id / encoding_method)
+    model_spec = _get_runner_model_spec(model_id)
+    progress_model = {"model_id": model_spec.model_id, "model_name": model_spec.display_name}
+    run_dir = _ensure_dir(Path(output_root) / model_spec.model_id / dataset_id / encoding_method)
 
     if skip_tuning and best_params_file is None:
         raise ValueError("skip_tuning requires best_params_file.")
@@ -622,6 +668,7 @@ def run_full_ctgan_experiment(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        **progress_model,
     )
 
     manifest = load_ctgan_manifest(manifest_path, project_root=project_root)
@@ -659,6 +706,7 @@ def run_full_ctgan_experiment(
             progress_format=progress_format,
             dataset_id=dataset_id,
             encoding_method=encoding_method,
+            **progress_model,
         )
         tuning_result = {
             "best_params": _load_best_params_file(best_params_file),
@@ -674,17 +722,19 @@ def run_full_ctgan_experiment(
                 progress_format=progress_format,
                 dataset_id=dataset_id,
                 encoding_method=encoding_method,
+                **progress_model,
             )
 
         _emit_progress(
             stage="tuning",
-            message="tuning ctgan",
+            message=f"tuning {model_spec.display_name.lower()}",
             progress_stream=progress_stream,
             progress_format=progress_format,
             dataset_id=dataset_id,
             encoding_method=encoding_method,
+            **progress_model,
         )
-        tuning_result = select_ctgan_best_params(
+        tuning_result = model_spec.select_best_params(
             df=df,
             schema=schema,
             dataset=dataset.label,
@@ -702,6 +752,7 @@ def run_full_ctgan_experiment(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        **progress_model,
     )
     per_fold_dir = _ensure_dir(run_dir / "crossval" / "per_fold")
     artifacts_dir = _ensure_dir(run_dir / "artifacts")
@@ -712,6 +763,7 @@ def run_full_ctgan_experiment(
             schema=schema,
             encoding_method=encoding_method,
             best_params=dict(tuning_result["best_params"]),
+            model_spec=model_spec,
             device=device,
             is_regression=is_regression,
             artifacts_dir=artifacts_dir,
@@ -727,6 +779,7 @@ def run_full_ctgan_experiment(
                 schema=schema,
                 encoding_method=encoding_method,
                 best_params=dict(tuning_result["best_params"]),
+                model_spec=model_spec,
                 device=device,
                 is_regression=is_regression,
                 artifacts_dir=artifacts_dir,
@@ -742,6 +795,7 @@ def run_full_ctgan_experiment(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        **progress_model,
     )
     if schema.target_col is None:
         _emit_progress(
@@ -751,6 +805,7 @@ def run_full_ctgan_experiment(
             progress_format=progress_format,
             dataset_id=dataset_id,
             encoding_method=encoding_method,
+            **progress_model,
         )
     distribution_records = [fold["distribution"] for fold in fold_results]
     utility_records = [
@@ -766,6 +821,9 @@ def run_full_ctgan_experiment(
     )
     aggregate_payload = {
         "dataset_id": dataset_id,
+        "model_id": model_spec.model_id,
+        "model_name": model_spec.display_name,
+        "artifact_filename": model_spec.artifact_filename,
         "dataset_label": dataset_label,
         "encoding_method": encoding_method,
         "n_folds": n_folds,
@@ -786,12 +844,16 @@ def run_full_ctgan_experiment(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        **progress_model,
     )
     summary_path = run_dir / "run_summary.json"
     _save_json(
         summary_path,
         {
             "dataset_id": dataset_id,
+            "model_id": model_spec.model_id,
+            "model_name": model_spec.display_name,
+            "artifact_filename": model_spec.artifact_filename,
             "dataset_label": dataset.label,
             "encoding_label": encoding.label,
             "encoding_method": encoding_method,
@@ -836,6 +898,8 @@ def run_full_ctgan_experiment(
         dataset_label=dataset_label,
         encoding_method=encoding_method,
         encoding_label=encoding.label,
+        model_id=model_spec.model_id,
+        model_name=model_spec.display_name,
         progress_stream=progress_stream,
         progress_format=progress_format,
     )
@@ -854,6 +918,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-id", required=True)
     parser.add_argument("--dataset-label", required=True)
     parser.add_argument("--encoding-method", required=True)
+    parser.add_argument("--model-id", default="ctgan")
     parser.add_argument("--output-root", default=str(Path("experiments/results")))
     parser.add_argument("--progress-format", default="jsonl")
     parser.add_argument("--best-params-file")
@@ -862,7 +927,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--estimate-runtime", action="store_true")
     parser.add_argument("--estimate-sample-epochs", type=int, default=10)
-    parser.add_argument("--estimate-total-epochs", type=int, default=DEFAULT_CTGAN_EPOCHS)
+    parser.add_argument("--estimate-total-epochs", type=int)
     parser.add_argument("--estimate-total-runs", type=int, default=35)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args(argv)
@@ -872,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
         "dataset_id": args.dataset_id,
         "dataset_label": args.dataset_label,
         "encoding_method": args.encoding_method,
+        "model_id": args.model_id,
         "output_root": args.output_root,
         "progress_stream": sys.stdout,
         "progress_format": args.progress_format,
@@ -879,10 +945,11 @@ def main(argv: list[str] | None = None) -> int:
         "max_rows": args.max_rows,
     }
     if args.estimate_runtime:
+        model_spec = _get_runner_model_spec(args.model_id)
         run_ctgan_runtime_estimate(
             **common_kwargs,
             estimate_sample_epochs=args.estimate_sample_epochs,
-            estimate_total_epochs=args.estimate_total_epochs,
+            estimate_total_epochs=args.estimate_total_epochs or model_spec.default_epochs,
             estimate_total_runs=args.estimate_total_runs,
         )
     else:
@@ -905,13 +972,16 @@ def _maybe_upload_to_drive(
     encoding_label: str,
     progress_stream: Any,
     progress_format: str,
+    model_id: str = "ctgan",
+    model_name: str = "CTGAN",
 ) -> None:
     """Upload artifacts to Google Drive and write a row in the Results sheet.
 
     No-ops when CATREPBENCH_GDRIVE_RESULTS_FOLDER_ID is not set, so existing
-    pipelines without Drive configuration are unaffected. When Drive is
-    configured, failures propagate so the orchestrator does not mark a cell
-    done while Drive/Results saving failed.
+    pipelines without Drive configuration are unaffected. Drive/Results saving
+    is best-effort: completed local experiment artifacts remain valid even when
+    upload fails, and a separate refresh can upload or write missing Results
+    rows later.
     """
     try:
         from experiments.ctgan.orchestrator_staff.ctgan_drive import (
@@ -934,6 +1004,8 @@ def _maybe_upload_to_drive(
         progress_format=progress_format,
         dataset_id=dataset_id,
         encoding_method=encoding_method,
+        model_id=model_id,
+        model_name=model_name,
     )
 
     try:
@@ -943,7 +1015,7 @@ def _maybe_upload_to_drive(
         folder_url = upload_experiment_artifacts(
             drive_client=drive_client,
             run_dir=run_dir,
-            model_name="CTGAN",
+            model_name=model_name,
             dataset_id=dataset_id,
             encoding_method=encoding_method,
         )
@@ -952,7 +1024,7 @@ def _maybe_upload_to_drive(
         write_results_row(
             sheets_config=sheets_config,
             aggregate_metrics_path=aggregate_metrics_path,
-            model_name="CTGAN",
+            model_name=model_name,
             dataset_label=dataset_label,
             encoding_label=encoding_label,
             folder_url=folder_url,
@@ -968,12 +1040,24 @@ def _maybe_upload_to_drive(
             progress_format=progress_format,
             dataset_id=dataset_id,
             encoding_method=encoding_method,
+            model_id=model_id,
+            model_name=model_name,
         )
     except Exception as exc:  # noqa: BLE001
         import traceback
         print(f"[ctgan_drive] WARNING: Drive upload failed: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
-        raise
+        _emit_progress(
+            stage="saving",
+            message=f"Drive upload failed; local artifacts remain at {run_dir}: {exc}",
+            progress_stream=progress_stream,
+            progress_format=progress_format,
+            dataset_id=dataset_id,
+            encoding_method=encoding_method,
+            model_id=model_id,
+            model_name=model_name,
+        )
+        return
 
 
 if __name__ == "__main__":

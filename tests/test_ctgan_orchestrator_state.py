@@ -13,6 +13,21 @@ def test_blank_cell_is_implicit_not_started():
     payload = parse_cell_payload("   ")
     assert payload.status == "not-started"
     assert payload.stage is None
+    assert payload.model_id is None
+
+
+def test_parse_cell_payload_reads_optional_model_id():
+    payload = parse_cell_payload(
+        '{"v":1,"status":"in-progress","model_id":"tvae","run_id":"r1","owner":"h:p:0","started_at":"2026-04-02T00:00:00Z","heartbeat_at":"2026-04-02T00:00:00Z","finished_at":null,"stage":"tuning","note":""}'
+    )
+    assert payload.model_id == "tvae"
+
+
+def test_parse_legacy_cell_payload_without_model_id_defaults_to_none():
+    payload = parse_cell_payload(
+        '{"v":1,"status":"in-progress","run_id":"r1","owner":"h:p:0","started_at":"2026-04-02T00:00:00Z","heartbeat_at":"2026-04-02T00:00:00Z","finished_at":null,"stage":"tuning","note":""}'
+    )
+    assert payload.model_id is None
 
 
 def test_in_progress_cell_becomes_claimable_after_four_hours():
