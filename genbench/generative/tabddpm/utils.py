@@ -131,9 +131,8 @@ def log_categorical(log_x_start, log_prob):
 def index_to_log_onehot(x, num_classes):
     onehots = []
     for i in range(len(num_classes)):
-        # clamp, чтобы индексы гарантированно оставались в допустимом диапазоне
         x_i = x[:, i].clamp(0, num_classes[i] - 1)
-        onehots.append(F.one_hot(x[:, i], num_classes[i]))
+        onehots.append(F.one_hot(x_i, num_classes[i]))
 
     x_onehot = torch.cat(onehots, dim=1)
     log_onehot = torch.log(x_onehot.float().clamp(min=1e-30))
