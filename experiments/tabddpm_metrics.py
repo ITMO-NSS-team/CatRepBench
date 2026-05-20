@@ -354,8 +354,19 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
                 test_raw[col] = test_raw[col].astype(str)
                 synth_raw[col] = synth_raw[col].astype(str)
 
-        # WD - only continuous features
-        wd_cols = metric_schema.continuous_cols
+        # WD - only ORIGINAL continuous features (from source schema).
+        # Rationale: encoded-categorical representations (polynomial, helmert,
+        # GEL, similarity, frequency, ...) can produce columns with arbitrary,
+        # unbounded scales that are not normalized by ContinuousStandardScaler
+        # (which runs BEFORE encoding and only knows about source continuous
+        # cols). When TabDDPM occasionally produces outliers on those encoded
+        # columns, WassersteinDistance's internal StandardScaler.transform(synth)
+        # blows up by orders of magnitude (we've observed WD up to 1e9). WD as
+        # a measure of distributional fidelity should only be applied to
+        # genuinely numeric features of the original data; encoded categoricals
+        # are evaluated through KL on marginals and TSTR utility.
+        wd_cols = [c for c in schema.continuous_cols
+                   if c in test_raw.columns and c in synth_raw.columns]
         if wd_cols:
             schema_wd = TabularSchema(
                 continuous_cols=wd_cols,
