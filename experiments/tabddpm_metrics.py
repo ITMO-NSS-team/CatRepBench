@@ -354,9 +354,8 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
                 test_raw[col] = test_raw[col].astype(str)
                 synth_raw[col] = synth_raw[col].astype(str)
 
-        # WD - only ORIGINAL continuous features (from source schema).
-        wd_cols = [c for c in schema.continuous_cols
-                   if c in test_raw.columns and c in synth_raw.columns]
+        # WD - only continuous features
+        wd_cols = metric_schema.continuous_cols
         if wd_cols:
             schema_wd = TabularSchema(
                 continuous_cols=wd_cols,
