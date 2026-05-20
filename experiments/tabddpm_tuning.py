@@ -219,7 +219,7 @@ def _score_synthetic(
         synth_raw = synth_processed
 
     dist_pipeline = DistributionEvaluationPipeline(
-        metrics=[WassersteinDistanceMetric()]
+        metrics=[WassersteinDistanceMetric(include_discrete=False)]
     )
     dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
                                          schema=schema_raw).scores

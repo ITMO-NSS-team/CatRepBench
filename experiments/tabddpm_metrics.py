@@ -240,7 +240,7 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
         splits = kf.split(df)
 
-    wd_metric = WassersteinDistanceMetric()
+    wd_metric = WassersteinDistanceMetric(include_discrete=False)
     kl_metric = MarginalKLDivergenceMetric(include_categorical=False)
     corr_metric = CorrelationFrobeniusMetric(include_categorical=False)
     results = {
@@ -356,15 +356,14 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
                 test_raw[col] = test_raw[col].astype(str)
                 synth_raw[col] = synth_raw[col].astype(str)
 
-        # Distribution metrics on the source schema (continuous + discrete).
-        # Encoded-categorical columns vary in dimensionality and scale across
-        # representations, so we keep them out of unencoded WD/KL/Corr.
+        # WD only on continuous (per methodology: WD на дискретных ведет себя
+        # плохо). KL/Corr on continuous + discrete, Spearman for Corr.
+        wasserstein = (wd_metric.compute(test_raw, synth_raw, schema)
+                       if schema.continuous_cols else float('nan'))
         if schema.continuous_cols or schema.discrete_cols:
-            wasserstein = wd_metric.compute(test_raw, synth_raw, schema)
             kl_div = kl_metric.compute(test_raw, synth_raw, schema)
             corr_frob = corr_metric.compute(test_raw, synth_raw, schema)
         else:
-            wasserstein = float('nan')
             kl_div = float('nan')
             corr_frob = float('nan')
 
