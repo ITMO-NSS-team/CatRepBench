@@ -24,9 +24,9 @@ from genbench.generative.tabddpm.utils import FoundNANsError
 from genbench.evaluation.distribution.wasserstein import \
     WassersteinDistanceMetric
 from genbench.evaluation.distribution.marginal_kl import \
-    compute_marginal_kl_mean
+    MarginalKLDivergenceMetric
 from genbench.evaluation.distribution.corr_frobenius import \
-    compute_corr_frobenius
+    CorrelationFrobeniusMetric
 from experiments.tabddpm_tuning import tune_tabddpm
 
 DEFAULT_ENCODINGS = [
@@ -241,6 +241,8 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
         splits = kf.split(df)
 
     wd_metric = WassersteinDistanceMetric()
+    kl_metric = MarginalKLDivergenceMetric(include_categorical=False)
+    corr_metric = CorrelationFrobeniusMetric(include_categorical=False)
     results = {
         "wasserstein": [],
         "kl_divergence": [],
@@ -354,35 +356,17 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
                 test_raw[col] = test_raw[col].astype(str)
                 synth_raw[col] = synth_raw[col].astype(str)
 
-        # WD - only continuous features
-        wd_cols = metric_schema.continuous_cols
-        if wd_cols:
-            schema_wd = TabularSchema(
-                continuous_cols=wd_cols,
-                discrete_cols=[],
-                categorical_cols=[],
-            )
-            wasserstein = wd_metric.compute(test_raw, synth_raw, schema_wd)
+        # Distribution metrics on the source schema (continuous + discrete).
+        # Encoded-categorical columns vary in dimensionality and scale across
+        # representations, so we keep them out of unencoded WD/KL/Corr.
+        if schema.continuous_cols or schema.discrete_cols:
+            wasserstein = wd_metric.compute(test_raw, synth_raw, schema)
+            kl_div = kl_metric.compute(test_raw, synth_raw, schema)
+            corr_frob = corr_metric.compute(test_raw, synth_raw, schema)
         else:
             wasserstein = float('nan')
-
-        # KL - continuous + discrete features
-        kl_cols = (metric_schema.continuous_cols +
-                   metric_schema.discrete_cols)
-        if kl_cols:
-            schema_kl = TabularSchema(
-                continuous_cols=metric_schema.continuous_cols,
-                discrete_cols=metric_schema.discrete_cols,
-                categorical_cols=[],
-            )
-            kl_div = compute_marginal_kl_mean(test_raw, synth_raw,
-                                              schema_kl)
-        else:
             kl_div = float('nan')
-
-        # Corr - all features, using Spearman correlation
-        corr_frob = compute_corr_frobenius(test_raw, synth_raw,
-                                           metric_schema)
+            corr_frob = float('nan')
 
         if task_type == 'regression':
             from catboost import CatBoostRegressor, Pool as RegPool

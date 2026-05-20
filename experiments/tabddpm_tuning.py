@@ -204,65 +204,26 @@ def _score_synthetic(
         synth_processed: pd.DataFrame,
         schema_raw: TabularSchema,
         pipeline: TransformPipeline,
-        transformed_schema: TabularSchema,
 ) -> tuple[float, Dict[str, float]]:
-    # Look for the fitted StandardScaler in the pipeline
     scaler = None
     for tr in pipeline.transforms:
         if getattr(tr, 'name', '') == 'continuous_standard_scaler':
             scaler = tr
             break
 
-    # Inverse-scale numerical features (if possible)
     if scaler is not None and scaler.fitted_ and scaler.continuous_cols_:
         val_raw = scaler.inverse_transform(val_processed)
         synth_raw = scaler.inverse_transform(synth_processed)
-        metric_schema = schema_raw
-        print(
-            "    Tuning WD computed on raw (original) continuous features.")
     else:
-        # No continuous columns or scaler not fitted - stay in transformed
-        # space
         val_raw = val_processed
         synth_raw = synth_processed
-        metric_schema = transformed_schema
-        print(
-            "    Tuning WD computed on transformed features (no continuous "
-            "scaler).")
 
-    # Cast categorical columns to str so that Corr dist (and potentially
-    # other metrics) doesn't break
-    for col in schema_raw.categorical_cols:
-        if col in val_raw.columns and col in synth_raw.columns:
-            val_raw[col] = val_raw[col].astype(str)
-            synth_raw[col] = synth_raw[col].astype(str)
-
-    # WD on continuous features only
-    wd_cols = metric_schema.continuous_cols
-    if wd_cols:
-        schema_wd = TabularSchema(
-            continuous_cols=wd_cols,
-            discrete_cols=[],
-            categorical_cols=[],
-        )
-        dist_pipeline = DistributionEvaluationPipeline(
-            metrics=[WassersteinDistanceMetric()]
-        )
-        dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
-                                             schema=schema_wd).scores
-        wd = float(dist_scores.get("wasserstein_mean", np.nan))
-    else:
-        # Fallback to all features so that tuning doesn't fail for datasets
-        # without continuous columns
-        print(
-            "    No continuous columns; falling back to all features for "
-            "tuning WD.")
-        dist_pipeline = DistributionEvaluationPipeline(
-            metrics=[WassersteinDistanceMetric()]
-        )
-        dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
-                                             schema=metric_schema).scores
-        wd = float(dist_scores.get("wasserstein_mean", np.nan))
+    dist_pipeline = DistributionEvaluationPipeline(
+        metrics=[WassersteinDistanceMetric()]
+    )
+    dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
+                                         schema=schema_raw).scores
+    wd = float(dist_scores.get("wasserstein_mean", np.nan))
 
     details = {
         "objective_score": wd,
@@ -426,9 +387,8 @@ def tune_tabddpm(
             score, details = _score_synthetic(
                 val_processed=val_df,
                 synth_processed=synth_df,
-                schema_raw=schema,  # original schema
+                schema_raw=schema,
                 pipeline=pipeline,
-                transformed_schema=transformed_schema,
             )
             if not np.isfinite(score):
                 raise optuna.TrialPruned("Non-finite score.")
