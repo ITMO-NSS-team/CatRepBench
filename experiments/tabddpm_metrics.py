@@ -356,8 +356,8 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
                 test_raw[col] = test_raw[col].astype(str)
                 synth_raw[col] = synth_raw[col].astype(str)
 
-        # WD only on continuous (per methodology: WD на дискретных ведет себя
-        # плохо). KL/Corr on continuous + discrete, Spearman for Corr.
+        # WD only on continuous (WD on discrete behaves poorly).
+        # KL/Corr on continuous + discrete, Spearman for Corr.
         wasserstein = (wd_metric.compute(test_raw, synth_raw, schema)
                        if schema.continuous_cols else float('nan'))
         if schema.continuous_cols or schema.discrete_cols:
