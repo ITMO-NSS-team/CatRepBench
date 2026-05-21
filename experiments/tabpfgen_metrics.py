@@ -18,7 +18,9 @@ from genbench.transforms.pipeline import TransformPipeline
 from genbench.transforms.continuous import ContinuousStandardScaler
 from genbench.transforms.categorical import CategoricalRepresentationTransform
 from genbench.transforms.missing import DropMissingRows
-from genbench.transforms.target import TargetTypePreprocessor
+from genbench.transforms.target import (
+    TargetTypePreprocessor, infer_is_regression_target,
+)
 from genbench.generative.tabpfgen.tabpfgen import TabPFGenGenerative
 from genbench.evaluation.distribution.wasserstein import \
     WassersteinDistanceMetric
@@ -83,6 +85,28 @@ def get_target_column(df: pd.DataFrame, dataset_name: str) -> str:
     if dataset_name in TARGET_MAP:
         return TARGET_MAP[dataset_name]
     return df.columns[-1]
+
+
+def default_params_no_tuning(
+        df: pd.DataFrame, schema: TabularSchema, device: str
+) -> Dict:
+    """TabPFGen defaults from the upstream README, no Optuna involvement."""
+    target_col = schema.target_col
+    is_regression = (
+        target_col is not None
+        and target_col in df.columns
+        and infer_is_regression_target(df[target_col])
+    )
+    task_type = "regression" if is_regression else "classification"
+    best_params = {
+        "n_sgld_steps": 1000,
+        "sgld_step_size": 0.01,
+        "sgld_noise_scale": 0.01,
+        "device": device,
+        "balance_classes": False,
+        "use_quantiles": True,
+    }
+    return {"best_params": best_params, "task_type": task_type}
 
 
 def ensure_tuning(df: pd.DataFrame, schema: TabularSchema, dataset_name: str,
@@ -462,6 +486,11 @@ def main():
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--max_datasets", type=int, default=None)
     parser.add_argument("--skip_existing", action="store_true")
+    parser.add_argument(
+        "--no-tuning", dest="no_tuning", action="store_true",
+        help="Skip Optuna; use TabPFGen defaults "
+             "(n_sgld_steps=1000, sgld_step_size=0.01, sgld_noise_scale=0.01)."
+    )
     args = parser.parse_args()
 
     raw_dir = Path(args.raw_dir)
@@ -532,15 +561,21 @@ def main():
                 else:
                     pass
 
-            tuning_info = ensure_tuning(
-                df=df, schema=schema, dataset_name=dataset_name,
-                encoding_method=enc, n_trials=args.trials,
-                device=args.device, seed=args.seed,
-                output_root=Path(args.output_root)
-            )
-            if tuning_info is None:
-                print(f"  Skipping method {enc} due to tuning error")
-                continue
+            if args.no_tuning:
+                print("  --no-tuning: using TabPFGen defaults")
+                tuning_info = default_params_no_tuning(
+                    df=df, schema=schema, device=args.device
+                )
+            else:
+                tuning_info = ensure_tuning(
+                    df=df, schema=schema, dataset_name=dataset_name,
+                    encoding_method=enc, n_trials=args.trials,
+                    device=args.device, seed=args.seed,
+                    output_root=Path(args.output_root)
+                )
+                if tuning_info is None:
+                    print(f"  Skipping method {enc} due to tuning error")
+                    continue
 
             best_params = tuning_info["best_params"]
             task_type = tuning_info["task_type"]
