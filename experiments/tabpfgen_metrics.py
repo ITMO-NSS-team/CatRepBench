@@ -4,7 +4,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
-import json
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -13,7 +12,6 @@ from catboost import CatBoostClassifier, Pool
 from typing import Dict
 
 from genbench.data.schema import TabularSchema
-from genbench.data.splits import SplitConfigHoldout
 from genbench.transforms.pipeline import TransformPipeline
 from genbench.transforms.continuous import ContinuousStandardScaler
 from genbench.transforms.categorical import CategoricalRepresentationTransform
@@ -28,7 +26,6 @@ from genbench.evaluation.distribution.marginal_kl import \
     MarginalKLDivergenceMetric
 from genbench.evaluation.distribution.corr_frobenius import \
     CorrelationFrobeniusMetric
-from experiments.tabpfgen_tuning import tune_tabpfgen
 
 DEFAULT_ENCODINGS = [
     "one_hot_representation",
@@ -87,10 +84,14 @@ def get_target_column(df: pd.DataFrame, dataset_name: str) -> str:
     return df.columns[-1]
 
 
-def default_params_no_tuning(
+def get_default_params(
         df: pd.DataFrame, schema: TabularSchema, device: str
 ) -> Dict:
-    """TabPFGen defaults from the upstream README, no Optuna involvement."""
+    """
+    TabPFGen is a pre-trained model — no per-dataset tuning. We use upstream
+    defaults from the sebhaan/TabPFGen README and infer the task type from the
+    target column.
+    """
     target_col = schema.target_col
     is_regression = (
         target_col is not None
@@ -103,57 +104,10 @@ def default_params_no_tuning(
         "sgld_step_size": 0.01,
         "sgld_noise_scale": 0.01,
         "device": device,
-        "balance_classes": False,
+        "balance_classes": True,
         "use_quantiles": True,
     }
     return {"best_params": best_params, "task_type": task_type}
-
-
-def ensure_tuning(df: pd.DataFrame, schema: TabularSchema, dataset_name: str,
-                  encoding_method: str, n_trials: int,
-                  device: str, seed: int, output_root: Path):
-    """Runs tuning if best_params.json is missing. Returns a dict or None on
-    error."""
-    optuna_dir = output_root / "tabpfgen" / dataset_name / encoding_method
-    best_params_path = optuna_dir / "best_params.json"
-    summary_path = optuna_dir / "summary.json"
-
-    if best_params_path.exists() and summary_path.exists():
-        print(f"  Tuning already done, loading parameters from {optuna_dir}")
-        with open(best_params_path) as f:
-            best_data = json.load(f)
-        best_params = best_data["best_params"]
-        with open(summary_path) as f:
-            task_type = json.load(f)["task_type"]
-        return {"best_params": best_params, "task_type": task_type}
-    else:
-        print(f"  Running tuning for {encoding_method}...")
-        try:
-            tuning_result = tune_tabpfgen(
-                df=df,
-                schema=schema,
-                dataset=dataset_name,
-                encoding_method=encoding_method,
-                n_trials=n_trials,
-                seed=seed,
-                task_type=None,
-                holdout_cfg=SplitConfigHoldout(val_size=0.2, shuffle=True,
-                                               random_seed=5),
-                output_root=output_root,
-                save_model=False,
-                device=device,
-            )
-            with open(tuning_result.best_params_path) as f:
-                best_data = json.load(f)
-            best_params = best_data["best_params"]
-            with open(tuning_result.summary_path) as f:
-                task_type = json.load(f)["task_type"]
-            return {"best_params": best_params, "task_type": task_type}
-        except Exception as e:
-            print(
-                f"  Tuning for {encoding_method} failed: "
-                f"{type(e).__name__}: {e}")
-            return None
 
 
 def tstr_catboost_classifier(
@@ -476,21 +430,12 @@ def run_cv_for_encoding(df: pd.DataFrame, schema: TabularSchema,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--raw_dir", type=str, default="datasets/raw")
-    parser.add_argument("--output_root", type=str,
-                        default="experiments/optuna_results")
     parser.add_argument("--encodings", nargs="+", default=DEFAULT_ENCODINGS)
-    parser.add_argument("--trials", type=int, default=30)
-    parser.add_argument("--device", type=str, default="cuda" if __import__(
-        'torch').cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--max_datasets", type=int, default=None)
     parser.add_argument("--skip_existing", action="store_true")
-    parser.add_argument(
-        "--no-tuning", dest="no_tuning", action="store_true",
-        help="Skip Optuna; use TabPFGen defaults "
-             "(n_sgld_steps=1000, sgld_step_size=0.01, sgld_noise_scale=0.01)."
-    )
     args = parser.parse_args()
 
     raw_dir = Path(args.raw_dir)
@@ -561,24 +506,11 @@ def main():
                 else:
                     pass
 
-            if args.no_tuning:
-                print("  --no-tuning: using TabPFGen defaults")
-                tuning_info = default_params_no_tuning(
-                    df=df, schema=schema, device=args.device
-                )
-            else:
-                tuning_info = ensure_tuning(
-                    df=df, schema=schema, dataset_name=dataset_name,
-                    encoding_method=enc, n_trials=args.trials,
-                    device=args.device, seed=args.seed,
-                    output_root=Path(args.output_root)
-                )
-                if tuning_info is None:
-                    print(f"  Skipping method {enc} due to tuning error")
-                    continue
-
-            best_params = tuning_info["best_params"]
-            task_type = tuning_info["task_type"]
+            params_info = get_default_params(
+                df=df, schema=schema, device=args.device
+            )
+            best_params = params_info["best_params"]
+            task_type = params_info["task_type"]
 
             print(f"  Running cross-validation...")
             metrics = run_cv_for_encoding(

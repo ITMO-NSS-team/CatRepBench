@@ -86,8 +86,9 @@ def test_model_state_round_trip():
         sgld_step_size=0.05,
         sgld_noise_scale=0.02,
         device="cpu",
-        balance_classes=True,
+        balance_classes=False,
         use_quantiles=False,
+        seed=7,
     )
     state = model.get_state()
     restored = TabPFGenGenerative.from_state(state)
@@ -96,8 +97,19 @@ def test_model_state_round_trip():
     assert restored.sgld_step_size == 0.05
     assert restored.sgld_noise_scale == 0.02
     assert restored.device == "cpu"
-    assert restored.balance_classes is True
+    assert restored.balance_classes is False
     assert restored.use_quantiles is False
+    assert restored.seed == 7
+
+
+def test_defaults_match_reference():
+    model = TabPFGenGenerative()
+    assert model.n_sgld_steps == 1000
+    assert model.sgld_step_size == 0.01
+    assert model.sgld_noise_scale == 0.01
+    assert model.device == "auto"
+    assert model.balance_classes is True
+    assert model.use_quantiles is True
 
 
 def test_infer_task_type_categorical_target():
@@ -171,11 +183,28 @@ def test_sample_without_fit_raises():
 @patch("genbench.generative.tabpfgen.tabpfgen.TabPFGen", DummyTabPFGen)
 def test_balance_classes_passed_through(classification_data):
     df, schema = classification_data
-    model = TabPFGenGenerative(device="cpu", balance_classes=True)
+    model = TabPFGenGenerative(device="cpu", balance_classes=False)
     model.fit(df, schema)
     model.sample(3)
     # Pull the dummy out via the model_ attribute and check the call kwargs
-    assert model.model_.gen_class_calls[0]["balance_classes"] is True
+    assert model.model_.gen_class_calls[0]["balance_classes"] is False
+
+
+@patch("genbench.generative.tabpfgen.tabpfgen.TabPFGen", DummyTabPFGen)
+def test_sample_preserves_column_order(classification_data):
+    df, schema = classification_data
+    # Reorder columns so target is in the middle
+    df_reordered = df[["x1", "target", "x2"]]
+    schema2 = TabularSchema(
+        continuous_cols=["x1", "x2"],
+        discrete_cols=[],
+        categorical_cols=["target"],
+        target_col="target",
+    )
+    model = TabPFGenGenerative(device="cpu")
+    model.fit(df_reordered, schema2)
+    synth = model.sample(4)
+    assert list(synth.columns) == ["x1", "target", "x2"]
 
 
 @patch("genbench.generative.tabpfgen.tabpfgen.TabPFGen", DummyTabPFGen)
