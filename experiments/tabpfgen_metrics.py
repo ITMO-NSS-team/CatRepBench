@@ -30,6 +30,7 @@ from genbench.evaluation.distribution.marginal_kl import \
     MarginalKLDivergenceMetric
 from genbench.evaluation.distribution.corr_frobenius import \
     CorrelationFrobeniusMetric
+from experiments._timing import ExperimentTimings, timed
 
 DEFAULT_ENCODINGS = [
     "one_hot_representation",
@@ -440,7 +441,11 @@ def main():
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--max_datasets", type=int, default=None)
     parser.add_argument("--skip_existing", action="store_true")
+    parser.add_argument("--timings_file", type=str,
+                        default="experiments/timings_tabpfgen.json")
     args = parser.parse_args()
+
+    timings = ExperimentTimings(args.timings_file)
 
     raw_dir = Path(args.raw_dir)
     if not raw_dir.exists():
@@ -517,16 +522,24 @@ def main():
             task_type = params_info["task_type"]
 
             print(f"  Running cross-validation...")
-            metrics = run_cv_for_encoding(
-                df=df, schema=schema, encoding_method=enc,
-                best_params=best_params, task_type=task_type,
-                n_folds=args.n_folds, random_state=args.seed
-            )
+            with timed() as t_cv:
+                metrics = run_cv_for_encoding(
+                    df=df, schema=schema, encoding_method=enc,
+                    best_params=best_params, task_type=task_type,
+                    n_folds=args.n_folds, random_state=args.seed
+                )
+            timings.add(dataset_name, enc, cv_seconds=t_cv.elapsed)
             if metrics is None:
                 print(
                     f"  Skipping method {enc} due to error in "
                     f"cross-validation")
                 continue
+
+            entry = timings.get(dataset_name, enc) or {}
+            print(
+                f"  Time: cv={entry.get('cv_seconds', 0):.1f}s "
+                f"(total={entry.get('total_seconds', 0):.1f}s)"
+            )
 
             print(f"  Results: {metrics}")
             result_df = pd.DataFrame([metrics])
