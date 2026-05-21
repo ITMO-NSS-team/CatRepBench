@@ -113,7 +113,7 @@ def test_tune_tabddpm_saves_outputs_and_returns_params(tmp_path, monkeypatch):
 
     assert isinstance(result.best_params, dict)
     assert result.best_params
-    # Проверяем правильность формирования пути (tabddpm вместо ctgan)
+    # Verify output path is built correctly (tabddpm subdir, not ctgan)
     assert (result.output_dir == tmp_path / "optuna_results" / "tabddpm" /
             "adult_sample" / "one_hot_representation")
     assert result.summary_path.exists()
@@ -137,18 +137,17 @@ def test_tune_tabddpm_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert "num_steps" in DummyTabDDPMGenerative.created[0].params
     assert "num_steps" in result.best_params
 
-    # Проверяем, что мок-модель вызывалась корректно
+    # Verify the mock model was called correctly
     assert DummyTabDDPMGenerative.created
     assert DummyTabDDPMGenerative.created[0].sample_sizes
     assert DummyTabDDPMGenerative.created[0].sample_sizes[
                0] == 8  # len(val) for 80/20 split on n=40
     assert DummyTabDDPMGenerative.created[0].train_df is not None
-    # Проверяем, что категориальный признак был закодирован
+    # Verify the categorical feature was encoded
     assert "x_cat" not in DummyTabDDPMGenerative.created[0].train_df.columns
     assert any(col.startswith("x_cat__") for col in
                DummyTabDDPMGenerative.created[0].train_df.columns)
-    # Проверяем, что в параметры модели передались как перебираемые,
-    # так и дефолтные значения
+    # Verify that both tunable and default values were passed to the model
     assert "lr" in DummyTabDDPMGenerative.created[0].params
     assert DummyTabDDPMGenerative.created[0].params["weight_decay"] == 0.0
     assert DummyTabDDPMGenerative.created[0].params["dim_t"] == 256
@@ -215,8 +214,8 @@ def test_tune_tabddpm_regression_branch_scales_target_and_keeps_it_continuous(
     payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
     assert payload["task_type"] == "regression"
     assert DummyTabDDPMGenerative.created
-    # В случае регрессии таргет масштабируется и не должен быть в дискретных
-    # фичах (если бы мы их собирали)
+    # For regression, the target is scaled and should not appear in discrete
+    # features (if we were collecting them)
     assert payload["preprocessing"]["target_processing"][
                "target_scaled"] is True
 
@@ -252,7 +251,7 @@ def test_tune_tabddpm_holdout_split_is_independent_from_optuna_seed(tmp_path,
     train_b = DummyTabDDPMGenerative.created[1].train_df
     assert train_a is not None
     assert train_b is not None
-    # Сплит должен быть одинаковым, так как random_seed=5 захардкожен в
+    # The split must be identical because random_seed=5 is hardcoded in
     # holdout_cfg
     pd.testing.assert_frame_equal(train_a, train_b)
 
@@ -300,9 +299,9 @@ def test_tune_tabddpm_retypes_high_cardinality_integer_feature_as_continuous(
     )
 
     assert DummyTabDDPMGenerative.created
-    # Проверяем, что препроцессор генбенча отработал и изменил тип колонки
-    # (проверяется через то, что модель вообще успешно обучилась на данных
-    # без ошибки типов)
+    # Verify the genbench preprocessor ran and adjusted the column type
+    # (checked indirectly via the model being able to fit on the data
+    # without dtype errors)
     assert DummyTabDDPMGenerative.created[0].fitted_ is True
 
 
