@@ -28,6 +28,7 @@ from genbench.evaluation.distribution.marginal_kl import \
 from genbench.evaluation.distribution.corr_frobenius import \
     CorrelationFrobeniusMetric
 from experiments.tabddpm_tuning import tune_tabddpm
+from experiments._timing import ExperimentTimings, timed
 
 DEFAULT_ENCODINGS = [
     "one_hot_representation",
@@ -480,7 +481,11 @@ def main():
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--max_datasets", type=int, default=None)
     parser.add_argument("--skip_existing", action="store_true")
+    parser.add_argument("--timings_file", type=str,
+                        default="experiments/timings_tabddpm.json")
     args = parser.parse_args()
+
+    timings = ExperimentTimings(args.timings_file)
 
     raw_dir = Path(args.raw_dir)
     if not raw_dir.exists():
@@ -550,12 +555,14 @@ def main():
                 else:
                     pass
 
-            tuning_info = ensure_tuning(
-                df=df, schema=schema, dataset_name=dataset_name,
-                encoding_method=enc, n_trials=args.trials,
-                device=args.device, seed=args.seed,
-                output_root=Path(args.output_root)
-            )
+            with timed() as t_tune:
+                tuning_info = ensure_tuning(
+                    df=df, schema=schema, dataset_name=dataset_name,
+                    encoding_method=enc, n_trials=args.trials,
+                    device=args.device, seed=args.seed,
+                    output_root=Path(args.output_root)
+                )
+            timings.add(dataset_name, enc, tuning_seconds=t_tune.elapsed)
             if tuning_info is None:
                 print(f"  Skipping method {enc} due to tuning error")
                 continue
@@ -564,16 +571,25 @@ def main():
             task_type = tuning_info["task_type"]
 
             print(f"  Running cross-validation...")
-            metrics = run_cv_for_encoding(
-                df=df, schema=schema, encoding_method=enc,
-                best_params=best_params, task_type=task_type,
-                n_folds=args.n_folds, random_state=args.seed
-            )
+            with timed() as t_cv:
+                metrics = run_cv_for_encoding(
+                    df=df, schema=schema, encoding_method=enc,
+                    best_params=best_params, task_type=task_type,
+                    n_folds=args.n_folds, random_state=args.seed
+                )
+            timings.add(dataset_name, enc, cv_seconds=t_cv.elapsed)
             if metrics is None:
                 print(
                     f"  Skipping method {enc} due to error in "
                     f"cross-validation")
                 continue
+
+            entry = timings.get(dataset_name, enc) or {}
+            print(
+                f"  Time: tuning={entry.get('tuning_seconds', 0):.1f}s, "
+                f"cv={entry.get('cv_seconds', 0):.1f}s, "
+                f"total={entry.get('total_seconds', 0):.1f}s"
+            )
 
             print(f"  Results: {metrics}")
             result_df = pd.DataFrame([metrics])
