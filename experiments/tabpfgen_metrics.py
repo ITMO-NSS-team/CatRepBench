@@ -541,6 +541,12 @@ def main():
                 f"(total={entry.get('total_seconds', 0):.1f}s)"
             )
 
+            metrics["tuning_seconds"] = float(
+                entry.get("tuning_seconds", 0.0))
+            metrics["cv_seconds"] = float(entry.get("cv_seconds", 0.0))
+            metrics["total_seconds"] = float(
+                entry.get("total_seconds", 0.0))
+
             print(f"  Results: {metrics}")
             result_df = pd.DataFrame([metrics])
             result_df.to_csv(out_csv, index=False)
