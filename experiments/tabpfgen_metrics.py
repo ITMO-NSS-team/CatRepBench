@@ -3,6 +3,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Optional: bypass api.priorlabs.ai when geo-blocked (set
+# TABPFN_PRIORLABS_BYPASS=1). Must run before any tabpfn / tabpfgen import.
+from experiments import _priorlabs_bypass  # noqa: F401
+
 import argparse
 import pandas as pd
 import numpy as np
