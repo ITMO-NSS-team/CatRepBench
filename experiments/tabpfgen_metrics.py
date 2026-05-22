@@ -90,12 +90,15 @@ def get_target_column(df: pd.DataFrame, dataset_name: str) -> str:
 
 
 def get_default_params(
-        df: pd.DataFrame, schema: TabularSchema, device: str
+        df: pd.DataFrame, schema: TabularSchema, device: str,
+        balance_classes: bool = False,
 ) -> Dict:
     """
     TabPFGen is a pre-trained model — no per-dataset tuning. We use upstream
     defaults from the sebhaan/TabPFGen README and infer the task type from the
-    target column.
+    target column. balance_classes defaults to False because the upstream
+    balancing logic degrades to the majority class on imbalanced data
+    (see sebhaan/TabPFGen issue #6).
     """
     target_col = schema.target_col
     is_regression = (
@@ -109,7 +112,7 @@ def get_default_params(
         "sgld_step_size": 0.01,
         "sgld_noise_scale": 0.01,
         "device": device,
-        "balance_classes": True,
+        "balance_classes": balance_classes,
         "use_quantiles": True,
     }
     return {"best_params": best_params, "task_type": task_type}
@@ -441,6 +444,14 @@ def main():
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--max_datasets", type=int, default=None)
     parser.add_argument("--skip_existing", action="store_true")
+    parser.add_argument(
+        "--balance-classes", dest="balance_classes",
+        action=argparse.BooleanOptionalAction, default=False,
+        help="Pass balance_classes to TabPFGen. Default False because the "
+             "upstream balancer collapses target on imbalanced data "
+             "(sebhaan/TabPFGen issue #6). Use --balance-classes to enable, "
+             "--no-balance-classes to force off (default).",
+    )
     parser.add_argument("--timings_file", type=str,
                         default="experiments/timings_tabpfgen.json")
     args = parser.parse_args()
@@ -516,7 +527,8 @@ def main():
                     pass
 
             params_info = get_default_params(
-                df=df, schema=schema, device=args.device
+                df=df, schema=schema, device=args.device,
+                balance_classes=args.balance_classes,
             )
             best_params = params_info["best_params"]
             task_type = params_info["task_type"]
