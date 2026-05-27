@@ -82,6 +82,8 @@ class TabPFGenGenerative(BaseGenerative):
                 "tabpfgen is required. Install via: pip install tabpfgen"
             ) from exc
 
+        _install_tabpfgen_patches()
+
         self.model_ = TabPFGen(
             n_sgld_steps=int(self.n_sgld_steps),
             sgld_step_size=float(self.sgld_step_size),
@@ -203,6 +205,80 @@ def _to_numpy(x):
     if hasattr(x, "detach"):
         return x.detach().cpu().numpy()
     return np.asarray(x)
+
+
+def _install_tabpfgen_patches() -> None:
+    """
+    Monkey-patch sebhaan/TabPFGen.generate_classification to fix the
+    balance_classes=False branch crashing with
+    'can't convert cuda:0 device type tensor to numpy'.
+
+    Upstream tabpfgen/tabpfgen.py line ~406:
+        y_synth = torch.randint(0, len(np.unique(y_train)), ...)
+    where y_train was just converted to a CUDA tensor a few lines above.
+    We re-implement the method with .cpu().numpy() on that one line.
+    """
+    import tabpfgen.tabpfgen as _ml
+    if getattr(_ml.TabPFGen.generate_classification, "_catrepbench_patched",
+               False):
+        return
+
+    import torch
+    from tabpfn import TabPFNClassifier
+
+    def generate_classification(self, X_train, y_train, n_samples,
+                                balance_classes=True):
+        X_scaled = self.scaler.fit_transform(X_train)
+        x_train = torch.tensor(X_scaled, device=self.device,
+                               dtype=torch.float32)
+        y_train_t = torch.tensor(y_train, device=self.device)
+
+        if balance_classes:
+            classes = np.unique(y_train_t.cpu().numpy())
+            n_per_class = n_samples // len(classes)
+            x_synth_list, y_synth_list = [], []
+            for cls in classes:
+                idx = np.where(y_train_t.cpu().numpy() == cls)[0]
+                sample_idx = np.random.choice(idx, size=n_per_class)
+                x_init = (
+                    x_train[sample_idx]
+                    + torch.randn(n_per_class, X_train.shape[1],
+                                  device=self.device) * 0.01
+                )
+                y_init = torch.full((n_per_class,), cls, device=self.device)
+                x_synth_list.append(x_init)
+                y_synth_list.append(y_init)
+            x_synth = torch.cat(x_synth_list, dim=0)
+            y_synth = torch.cat(y_synth_list, dim=0)
+        else:
+            x_synth = torch.randn(
+                n_samples, X_train.shape[1], device=self.device) * 0.01
+            n_classes = len(np.unique(y_train_t.cpu().numpy()))
+            y_synth = torch.randint(
+                0, n_classes, (n_samples,), device=self.device
+            )
+
+        for step in range(self.n_sgld_steps):
+            x_synth = self._sgld_step(x_synth, y_synth, x_train, y_train_t)
+            if step % 100 == 0:
+                print(f"Step {step}/{self.n_sgld_steps}")
+
+        x_synth_np = x_synth.detach().cpu().numpy()
+        x_train_np = x_train.cpu().numpy()
+        y_train_np = y_train_t.cpu().numpy()
+
+        clf = TabPFNClassifier(device=self.device)
+        clf.fit(x_train_np, y_train_np)
+        probs = clf.predict_proba(x_synth_np)
+        y_synth = torch.tensor(probs.argmax(axis=1), device=self.device)
+
+        X_synth = self.scaler.inverse_transform(
+            x_synth.detach().cpu().numpy())
+        y_synth = y_synth.cpu().numpy()
+        return X_synth, y_synth
+
+    generate_classification._catrepbench_patched = True
+    _ml.TabPFGen.generate_classification = generate_classification
 
 
 def _infer_task_type(y: np.ndarray, schema: TabularSchema,
