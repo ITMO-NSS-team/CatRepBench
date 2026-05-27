@@ -119,8 +119,8 @@ class TabPFGenGenerative(BaseGenerative):
         else:
             raise RuntimeError(f"Unknown task type: {self.task_type_}")
 
-        X_synth = np.asarray(X_synth)
-        y_synth = np.asarray(y_synth)
+        X_synth = _to_numpy(X_synth)
+        y_synth = _to_numpy(y_synth)
 
         out = pd.DataFrame(index=range(len(X_synth)), columns=self.columns_)
         for j, c in enumerate(self._feature_cols):
@@ -196,6 +196,13 @@ class TabPFGenGenerative(BaseGenerative):
         obj.columns_ = payload.get("columns", [])
         obj.fitted_ = bool(payload.get("fitted", False))
         return obj
+
+
+def _to_numpy(x):
+    """Convert torch tensors (incl. on CUDA) and array-likes to numpy."""
+    if hasattr(x, "detach"):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
 
 
 def _infer_task_type(y: np.ndarray, schema: TabularSchema,
