@@ -56,8 +56,13 @@ def _infer_feature_types(
 
     feature_types: Dict[str, str] = {}
 
-    # All features from processed schema
-    all_features = processed_schema.feature_cols
+    # All features from processed schema, plus the target: TabDDPM models the
+    # target jointly with the features (it is part of X), so it must be assigned
+    # a feature type and modeled/sampled like any other column.
+    all_features = list(processed_schema.feature_cols)
+    target = processed_schema.target_col
+    if target is not None and target not in all_features:
+        all_features = all_features + [target]
 
     for col in all_features:
         if col in source_cont:
@@ -76,6 +81,10 @@ def _infer_feature_types(
                 feature_types[col] = 'categorical'
             elif col in processed_cat:
                 # Still categorical
+                feature_types[col] = 'categorical'
+            elif col == processed_schema.target_col:
+                # Categorical target: not listed in processed feature lists
+                # (it is only target_col), but still modeled categorically.
                 feature_types[col] = 'categorical'
             else:
                 raise ValueError(
@@ -200,13 +209,19 @@ class TabDDPMGenerative(BaseGenerative):
         # Store target column info
         self.target_col_ = processed_schema.target_col
 
+        # Model the target jointly with the features, so iterate over feature
+        # columns plus the target (which is excluded from feature_cols).
+        modeled_cols = list(processed_schema.feature_cols)
+        if self.target_col_ is not None and self.target_col_ not in modeled_cols:
+            modeled_cols.append(self.target_col_)
+
         # Separate into numerical and categorical based on inferred types
         self.numerical_cols_ = [
-            col for col in processed_schema.feature_cols
+            col for col in modeled_cols
             if feature_types.get(col) == 'numerical'
         ]
         self.categorical_cols_ = [
-            col for col in processed_schema.feature_cols
+            col for col in modeled_cols
             if feature_types.get(col) == 'categorical'
         ]
 
