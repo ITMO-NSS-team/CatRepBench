@@ -54,6 +54,19 @@ def test_build_worker_argv_preserves_orchestrator_contract():
     ]
 
 
+def test_build_worker_argv_adds_model_id_for_tvae():
+    argv = tmux_mod.build_worker_argv(
+        manifest_path=Path("/repo/experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json"),
+        worksheet="CTGAN",
+        output_root=Path("/repo/experiments/results"),
+        heartbeat_seconds=90,
+        model_id="tvae",
+    )
+
+    assert "--model-id" in argv
+    assert argv[argv.index("--model-id") + 1] == "tvae"
+
+
 def test_build_tmux_launch_command_wraps_worker_with_tee(tmp_path):
     command = tmux_mod.build_tmux_launch_command(
         session_name="ctgan-orch-node-a-02",
@@ -110,6 +123,31 @@ def test_launch_invokes_tmux_and_returns_session_info(monkeypatch, tmp_path):
     assert payload["session"] == "ctgan-orch-node-a-01"
     assert payload["worksheet"] == "CTGAN"
     assert payload["argv"][-1] == "75"
+
+
+def test_launch_metadata_records_model_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(tmux_mod.shutil, "which", lambda name: "/usr/bin/tmux")
+    monkeypatch.setattr(tmux_mod.socket, "gethostname", lambda: "node-a.local")
+
+    def fake_run(argv, *, check=False, cwd=None, capture_output=False, text=False):
+        if argv[:2] == ["tmux", "has-session"]:
+            return type("Result", (), {"stdout": "", "stderr": "", "returncode": 1})()
+        return type("Result", (), {"stdout": "", "stderr": "", "returncode": 0})()
+
+    monkeypatch.setattr(tmux_mod.subprocess, "run", fake_run)
+
+    result = tmux_mod.launch_session(
+        manifest_path=tmp_path / "manifest.json",
+        worksheet="CTGAN",
+        output_root=tmp_path / "results",
+        index=1,
+        heartbeat_seconds=75,
+        model_id="tvae",
+    )
+
+    payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert payload["model_id"] == "tvae"
+    assert payload["argv"][-2:] == ["--model-id", "tvae"]
 
 
 def test_attach_command_invokes_tmux_attach(monkeypatch):

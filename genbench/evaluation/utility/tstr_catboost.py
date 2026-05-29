@@ -22,6 +22,13 @@ def _to_1d_prediction_series(preds: object, *, dtype: object | None = None) -> p
     return pd.Series(arr).astype(dtype if dtype is not None else None)
 
 
+def _single_target_value(target: pd.Series) -> object | None:
+    values = target.dropna().unique()
+    if len(values) == 1:
+        return values[0]
+    return None
+
+
 def _prepare_features(df: pd.DataFrame, schema: TabularSchema) -> pd.DataFrame:
     missing = [c for c in schema.all_cols if c not in df.columns]
     if missing:
@@ -113,6 +120,16 @@ def tstr_catboost(
         return float(abs(real_val - synth_val) / abs(real_val))
 
     def _fit_and_eval_classification(train_df: pd.DataFrame) -> Dict[str, float]:
+        constant_target = _single_target_value(train_df[target_col])
+        if constant_target is not None:
+            pred_series = pd.Series(
+                [constant_target] * len(test_real),
+                dtype=test_real[target_col].dtype if hasattr(test_real[target_col], "dtype") else None,
+            )
+            return {
+                "f1_weighted": float(f1_score(test_real[target_col], pred_series, average="weighted")),
+            }
+
         train_pool = Pool(train_df[feature_cols], train_df[target_col], cat_features=cat_features)
         test_pool = Pool(test_real[feature_cols], test_real[target_col], cat_features=cat_features)
         model = CatBoostClassifier(random_seed=random_seed, verbose=False)

@@ -47,6 +47,7 @@ _STATUS_TO_STAGE = {
 class CellPayload:
     v: int
     status: str
+    model_id: str | None
     run_id: str | None
     owner: str | None
     started_at: datetime | None
@@ -69,6 +70,7 @@ def parse_cell_payload(raw_value: str | None) -> CellPayload:
         return CellPayload(
             v=_SCHEMA_VERSION,
             status=_STATUS_NOT_STARTED,
+            model_id=None,
             run_id=None,
             owner=None,
             started_at=None,
@@ -83,6 +85,7 @@ def parse_cell_payload(raw_value: str | None) -> CellPayload:
         return CellPayload(
             v=_SCHEMA_VERSION,
             status=_STATUS_NOT_STARTED,
+            model_id=None,
             run_id=None,
             owner=None,
             started_at=None,
@@ -103,6 +106,7 @@ def parse_cell_payload(raw_value: str | None) -> CellPayload:
     expected_keys = {
         "v",
         "status",
+        "model_id",
         "run_id",
         "owner",
         "started_at",
@@ -116,6 +120,7 @@ def parse_cell_payload(raw_value: str | None) -> CellPayload:
         raise ValueError(f"cell payload contains unexpected keys: {sorted(unexpected_keys)!r}")
 
     missing_keys = expected_keys - set(payload)
+    missing_keys.discard("model_id")
     if missing_keys:
         raise ValueError(f"cell payload is missing required keys: {sorted(missing_keys)!r}")
 
@@ -127,6 +132,7 @@ def parse_cell_payload(raw_value: str | None) -> CellPayload:
     if not isinstance(status, str) or status not in _STATUS_TO_STAGE:
         raise ValueError("cell payload status is invalid.")
 
+    model_id = _parse_nullable_string(payload.get("model_id"), field_name="model_id")
     run_id = _parse_nullable_string(payload["run_id"], field_name="run_id")
     owner = _parse_nullable_string(payload["owner"], field_name="owner")
     started_at = _parse_nullable_timestamp(payload["started_at"], field_name="started_at")
@@ -169,6 +175,7 @@ def parse_cell_payload(raw_value: str | None) -> CellPayload:
     return CellPayload(
         v=version,
         status=status,
+        model_id=model_id,
         run_id=run_id,
         owner=owner,
         started_at=started_at,

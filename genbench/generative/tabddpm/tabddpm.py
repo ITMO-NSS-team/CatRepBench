@@ -571,8 +571,8 @@ class TabDDPMGenerative(BaseGenerative):
                 path / "model_ema.pt"
             )
 
-        # Save metadata
-        with open(path / "tabddpm_artifacts.pkl", "wb") as f:
+        # Save metadata (named to match ExperimentModelSpec.artifact_filename)
+        with open(path / "tabddpm.pkl", "wb") as f:
             pickle.dump(
                 {
                     "num_numerical_features": self.num_numerical_features_,
@@ -605,11 +605,16 @@ class TabDDPMGenerative(BaseGenerative):
         path = path.resolve()
 
         # Load metadata
-        artifacts_path = path / "tabddpm_artifacts.pkl"
+        artifacts_path = path / "tabddpm.pkl"
         if not artifacts_path.exists():
-            raise FileNotFoundError(
-                f"tabddpm_artifacts.pkl not found in {path}"
-            )
+            # Backward-compat with the previous artifact name.
+            legacy_path = path / "tabddpm_artifacts.pkl"
+            if legacy_path.exists():
+                artifacts_path = legacy_path
+            else:
+                raise FileNotFoundError(
+                    f"tabddpm.pkl not found in {path}"
+                )
 
         with open(artifacts_path, "rb") as f:
             payload = pickle.load(f)

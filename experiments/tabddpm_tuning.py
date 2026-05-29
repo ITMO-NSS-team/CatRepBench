@@ -36,7 +36,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import optuna
@@ -336,9 +336,11 @@ def tune_tabddpm(
         task_type: Optional[str] = None,
         holdout_cfg: Optional[SplitConfigHoldout] = None,
         output_root: Path | str = Path("experiments/optuna_results"),
+        output_dir: Path | str | None = None,
         save_model: bool = False,
         timeout_seconds: Optional[int] = None,
         device: str = "cuda",
+        progress_callback: Optional[Callable[[str], None]] = None,
 ) -> TabDDPMTuningResult:
     """
     Fine-tune TabDDPM with Optuna using the Wasserstein distance as objective.
@@ -348,12 +350,14 @@ def tune_tabddpm(
     """
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0.")
-    if device not in {"cpu", "cuda"}:
-        raise ValueError("device must be 'cpu' or 'cuda'.")
+    if device not in {"cpu", "cuda", "mps"}:
+        raise ValueError("device must be 'cpu', 'cuda' or 'mps'.")
     encoding_method = _validate_encoding_method(encoding_method)
 
     output_dir = _ensure_dir(
-        Path(output_root) / "tabddpm" / _slug(dataset) / _slug(
+        Path(output_dir)
+        if output_dir is not None
+        else Path(output_root) / "tabddpm" / _slug(dataset) / _slug(
             encoding_method))
     cfg = holdout_cfg or SplitConfigHoldout(val_size=0.2, shuffle=True,
                                             random_seed=5)
@@ -417,6 +421,8 @@ def tune_tabddpm(
     while successful < n_trials:
         # Run one trial at a time so we can check immediately when the
         # target is reached
+        if progress_callback is not None:
+            progress_callback(f"trial {successful + 1}/{n_trials}")
         study.optimize(
             objective,
             n_trials=1,

@@ -85,6 +85,7 @@ def run_once(
     sheets: SheetsClientProtocol,
     manifest_path: Path | str,
     worksheet_name: str,
+    model_id: str = "ctgan",
     dry_run: bool = False,
     heartbeat_seconds: int = 120,
     output_root: Path | str = _DEFAULT_OUTPUT_ROOT,
@@ -119,6 +120,7 @@ def run_once(
             snapshot=snapshot,
             manifest=manifest,
             owner=owner,
+            model_id=model_id,
         ):
             continue
 
@@ -167,6 +169,7 @@ def run_once(
                 estimate_sample_epochs=estimate_sample_epochs,
                 estimate_total_epochs=estimate_total_epochs,
                 estimate_total_runs=estimate_total_runs,
+                model_id=model_id,
             )
         )
 
@@ -203,6 +206,7 @@ def run_once(
         claimed_at = _utcnow()
         claim_payload = _build_payload(
             status="in-progress",
+            model_id=model_id,
             run_id=run_id,
             owner=owner,
             started_at=claimed_at,
@@ -233,6 +237,7 @@ def run_once(
                 coord=claim_coord,
                 run_id=run_id,
                 owner=owner,
+                model_id=model_id,
                 status="failed",
                 stage="failed",
                 note=f"launch failed: {exc}",
@@ -253,6 +258,7 @@ def run_once(
             coord=claim_coord,
             run_id=run_id,
             owner=owner,
+            model_id=model_id,
             process=process,
             heartbeat_seconds=heartbeat_seconds,
         )
@@ -290,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the CTGAN Google Sheets orchestrator.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--worksheet", required=True)
+    parser.add_argument("--model-id", default="ctgan")
     parser.add_argument("--output-root", default=str(_DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--heartbeat-seconds", type=int, default=120)
     parser.add_argument("--best-params-file")
@@ -312,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         sheets=sheets,
         manifest_path=args.manifest,
         worksheet_name=args.worksheet,
+        model_id=args.model_id,
         dry_run=args.dry_run,
         heartbeat_seconds=args.heartbeat_seconds,
         output_root=args.output_root,
@@ -382,6 +390,7 @@ def _supervise_runner(
     coord: str,
     run_id: str,
     owner: str,
+    model_id: str,
     process: Any,
     heartbeat_seconds: int,
 ) -> int:
@@ -405,6 +414,7 @@ def _supervise_runner(
                     coord=coord,
                     run_id=run_id,
                     owner=owner,
+                    model_id=model_id,
                     stage=current_stage,
                     note=current_note,
                 ):
@@ -429,6 +439,7 @@ def _supervise_runner(
                 coord=coord,
                 run_id=run_id,
                 owner=owner,
+                model_id=model_id,
                 stage=current_stage,
                 note=current_note,
             ):
@@ -455,6 +466,7 @@ def _supervise_runner(
         coord=coord,
         run_id=run_id,
         owner=owner,
+        model_id=model_id,
         status=terminal_status,
         stage=terminal_stage,
         note=terminal_note,
@@ -479,6 +491,7 @@ def _write_in_progress_state(
     coord: str,
     run_id: str,
     owner: str,
+    model_id: str,
     stage: str,
     note: str,
 ) -> bool:
@@ -487,6 +500,7 @@ def _write_in_progress_state(
     prior = parse_cell_payload(sheets.read_cell(coord))
     payload = _build_payload(
         status="in-progress",
+        model_id=model_id,
         run_id=run_id,
         owner=owner,
         started_at=prior.started_at or _utcnow(),
@@ -505,6 +519,7 @@ def _write_terminal_state(
     coord: str,
     run_id: str,
     owner: str,
+    model_id: str,
     status: str,
     stage: str,
     note: str,
@@ -515,6 +530,7 @@ def _write_terminal_state(
     now = _utcnow()
     payload = _build_payload(
         status=status,
+        model_id=model_id,
         run_id=run_id,
         owner=owner,
         started_at=prior.started_at or now,
@@ -603,6 +619,7 @@ def _build_runner_argv(
     dataset: DatasetEntry,
     encoding: EncodingEntry,
     output_root: Path,
+    model_id: str = "ctgan",
     best_params_file: Path | None,
     skip_tuning: bool,
     device: str,
@@ -629,6 +646,8 @@ def _build_runner_argv(
         "--progress-format",
         "jsonl",
     ]
+    if model_id != "ctgan":
+        argv.extend(["--model-id", model_id])
     if best_params_file is not None:
         argv.extend(["--best-params-file", str(best_params_file)])
     if skip_tuning:
@@ -710,6 +729,7 @@ def _apply_no_category_alias_skips(
     snapshot: WorksheetSnapshot,
     manifest: CtganManifest,
     owner: str,
+    model_id: str,
 ) -> bool:
     modified = False
     for dataset_label in snapshot.dataset_headers:
@@ -744,6 +764,7 @@ def _apply_no_category_alias_skips(
                 coord,
                 _build_payload(
                     status="skipped",
+                    model_id=representative_payload.model_id or model_id,
                     run_id=representative_payload.run_id,
                     owner=representative_payload.owner or owner,
                     started_at=representative_payload.started_at or now,
@@ -761,6 +782,7 @@ def _apply_no_category_alias_skips(
 def _build_payload(
     *,
     status: str,
+    model_id: str | None,
     run_id: str | None,
     owner: str | None,
     started_at: datetime | None,
@@ -773,6 +795,7 @@ def _build_payload(
         {
             "v": 1,
             "status": status,
+            "model_id": model_id,
             "run_id": run_id,
             "owner": owner,
             "started_at": _format_timestamp(started_at),

@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import f1_score
 
 from genbench.data.schema import TabularSchema
 from genbench.evaluation.distribution.corr_frobenius import CorrelationFrobeniusMetric
@@ -251,6 +252,71 @@ def test_tstr_catboost_flattens_2d_classifier_predictions(monkeypatch):
     assert scores["task_type"] == "classification"
     assert "f1_weighted_real" in scores
     assert "f1_weighted_synth" in scores
+
+
+def test_tstr_catboost_scores_single_class_synthetic_classification(monkeypatch):
+    fit_calls = {"n": 0}
+
+    class FakePool:
+        def __init__(self, data, label, cat_features=None):
+            self.data = data
+            self.label = label
+            self.cat_features = cat_features
+
+    class FakeCatBoostClassifier:
+        def __init__(self, random_seed, verbose):
+            self.random_seed = random_seed
+            self.verbose = verbose
+
+        def fit(self, pool):
+            if len(pd.Series(pool.label).dropna().unique()) == 1:
+                raise ValueError("single-class training target")
+            fit_calls["n"] += 1
+            return self
+
+        def predict(self, pool):
+            return np.asarray(pool.label)
+
+    monkeypatch.setattr(tstr_mod, "Pool", FakePool)
+    monkeypatch.setattr(tstr_mod, "CatBoostClassifier", FakeCatBoostClassifier)
+
+    real_train = pd.DataFrame(
+        {
+            "x": [0, 1, 0, 1],
+            "target": [0, 1, 0, 1],
+        }
+    )
+    real_test = pd.DataFrame(
+        {
+            "x": [0, 1, 0, 1],
+            "target": [0, 1, 1, 0],
+        }
+    )
+    synth_train = real_train.assign(target=0)
+    schema = TabularSchema(
+        continuous_cols=[],
+        discrete_cols=["x"],
+        categorical_cols=[],
+        target_col="target",
+    )
+
+    scores = tstr_catboost(
+        train_real=real_train,
+        test_real=real_test,
+        synth_train=synth_train,
+        schema=schema,
+        random_seed=0,
+        task_type="classification",
+    )
+
+    assert scores["task_type"] == "classification"
+    assert scores["f1_weighted_real"] == 1.0
+    assert scores["f1_weighted_synth"] == f1_score(
+        real_test["target"],
+        pd.Series([0, 0, 0, 0], dtype=real_test["target"].dtype),
+        average="weighted",
+    )
+    assert fit_calls["n"] == 1
 
 
 def test_tstr_evaluator_class(sample_data):

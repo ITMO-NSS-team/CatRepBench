@@ -175,6 +175,47 @@ echo "PID=$!"
 tail -f experiments/results/orchestrator_logs/orchestrator-poster-fast.log
 ```
 
+## TVAE Launch
+
+TVAE uses the same manifest and Google Sheets matrix shape as CTGAN, but it should run against a separate worksheet such as `TVAE`.
+
+```bash
+export CATREPBENCH_GSHEETS_WORKSHEET="TVAE"
+mkdir -p experiments/results/orchestrator_logs
+nohup .venv/bin/python experiments/ctgan/orchestrator_staff/ctgan_orchestrator.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
+  --worksheet TVAE \
+  --model-id tvae \
+  --continue-on-failure \
+  --poster-fast \
+  --max-rows 10000 \
+  --device cuda \
+  > experiments/results/orchestrator_logs/orchestrator-tvae-poster-fast.log 2>&1 < /dev/null &
+echo "PID=$!"
+```
+
+For a detached `tmux` worker:
+
+```bash
+python experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py launch \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
+  --worksheet TVAE \
+  --model-id tvae \
+  --index 1
+```
+
+Direct runner usage also accepts the model id:
+
+```bash
+python experiments/ctgan/ctgan_full_experiment.py \
+  --manifest experiments/ctgan/orchestrator_staff/ctgan_orchestrator_manifest.json \
+  --dataset-id openml_adult \
+  --dataset-label adult \
+  --encoding-method one_hot_representation \
+  --model-id tvae \
+  --device cuda
+```
+
 ### Current restart block
 
 Use this after a fresh `git pull` or after changing the runtime environment:
@@ -302,6 +343,12 @@ python experiments/ctgan/orchestrator_staff/ctgan_orchestrator_tmux.py tail \
 Experiment outputs are stored under:
 
 - `experiments/results/ctgan/<dataset_id>/<encoding_id>/`
+- `experiments/results/tvae/<dataset_id>/<encoding_id>/`
+
+Saved model artifact filenames are model-specific:
+
+- CTGAN: `ctgan.pkl`
+- TVAE: `tvae.pkl`
 
 Orchestrator `tmux` logs are stored under:
 
