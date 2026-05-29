@@ -11,7 +11,6 @@ Available tune_tabddpm flags:
 - encoding_method (str): Representation id. Must be one of
   `genbench.transforms.categorical.list_registered_representations()`.
 - n_trials (int, default=30): Optuna trial budget.
-- epochs (int, default=100): TabDDPM training epochs per trial.
 - seed (int, default=42): Seed for Optuna sampler and trial reproducibility.
 - task_type (Optional[str], default=None): "classification" or "regression".
   If None, inferred from target dtype/cardinality.
@@ -72,7 +71,7 @@ class TabDDPMTuningResult:
     best_params: Dict[str, Any]
     best_source: str
     n_trials: int
-    epochs: int
+    steps: int
     duration_seconds: float
     summary_path: Path
     trials_path: Path
@@ -167,14 +166,15 @@ def _suggest_mlp_layers(trial: optuna.Trial) -> List[int]:
 def _suggest_tabddpm_params(
         trial: optuna.Trial,
         *,
-        epochs: int,
         device: str,
 ) -> Dict[str, Any]:
     """Sample hyperparameters for TabDDPM."""
 
-    num_timesteps = trial.suggest_categorical("num_timesteps", [100, 1000])
-    batch_size = trial.suggest_categorical("batch_size", [256, 4096])
-    lr = trial.suggest_float("lr", 1e-5, 3e-3, log=True)
+    lr = trial.suggest_float("lr", 1e-5, 0.1, log=True)
+    batch_size = trial.suggest_int("batch_size", 256, 4096, log=True)
+    num_timesteps = trial.suggest_int("num_timesteps", 10, 1000)
+    num_steps = trial.suggest_int("num_steps", 1000, 10000, log=True)
+
     d_layers = _suggest_mlp_layers(trial)
 
     weight_decay = 0.0
@@ -185,7 +185,7 @@ def _suggest_tabddpm_params(
 
     return {
         "num_timesteps": num_timesteps,
-        "num_epochs": epochs,
+        "num_steps": num_steps,
         "batch_size": batch_size,
         "lr": lr,
         "weight_decay": weight_decay,
@@ -200,17 +200,32 @@ def _suggest_tabddpm_params(
 
 def _score_synthetic(
         *,
-        val_df: pd.DataFrame,
-        synth_df: pd.DataFrame,
-        schema: TabularSchema,
+        val_processed: pd.DataFrame,
+        synth_processed: pd.DataFrame,
+        schema_raw: TabularSchema,
+        pipeline: TransformPipeline,
 ) -> tuple[float, Dict[str, float]]:
-    dist_pipeline = DistributionEvaluationPipeline(
-        metrics=[WassersteinDistanceMetric()])
-    dist_scores = dist_pipeline.evaluate(real=val_df, synth=synth_df,
-                                         schema=schema).scores
+    scaler = None
+    for tr in pipeline.transforms:
+        if getattr(tr, 'name', '') == 'continuous_standard_scaler':
+            scaler = tr
+            break
 
+    if scaler is not None and scaler.fitted_ and scaler.continuous_cols_:
+        val_raw = scaler.inverse_transform(val_processed)
+        synth_raw = scaler.inverse_transform(synth_processed)
+    else:
+        val_raw = val_processed
+        synth_raw = synth_processed
+
+    dist_pipeline = DistributionEvaluationPipeline(
+        metrics=[WassersteinDistanceMetric(include_discrete=False)]
+    )
+    dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
+                                         schema=schema_raw).scores
     wd = float(dist_scores.get("wasserstein_mean", np.nan))
-    details: Dict[str, float] = {
+
+    details = {
         "objective_score": wd,
         "wasserstein_mean": wd,
     }
@@ -224,7 +239,8 @@ def _build_holdout(
         encoding_method: str,
         task_type: Optional[str],
         holdout_cfg: SplitConfigHoldout,
-) -> tuple[pd.DataFrame, pd.DataFrame, TabularSchema, Dict[str, Any]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, TabularSchema, Dict[
+    str, Any], TransformPipeline]:
     pipeline, representation_name = _build_preprocess_pipeline(
         schema=schema,
         encoding_method=encoding_method,
@@ -267,6 +283,14 @@ def _build_holdout(
         target_col=schema.target_col,
         id_col=schema.id_col,
     )
+    if not is_regression and transformed_schema.target_col is not None:
+        target = transformed_schema.target_col
+        if target in transformed_schema.continuous_cols:
+            transformed_schema.continuous_cols.remove(target)
+        if target in transformed_schema.discrete_cols:
+            transformed_schema.discrete_cols.remove(target)
+        if target not in transformed_schema.categorical_cols:
+            transformed_schema.categorical_cols.append(target)
     transformed_schema.validate(val_df)
     discrete_threshold = int(target_state.get("discrete_unique_threshold", 20))
     target_encoded = bool(target_state.get("did_encode", False))
@@ -290,7 +314,15 @@ def _build_holdout(
         },
         "discrete_unique_threshold": discrete_threshold,
     }
-    return train_df, val_df, transformed_schema, preprocessing_meta
+    # Use the fitted pipeline from holdout
+    trained_pipeline = holdout.transforms
+    # If holdout.transforms is not a TransformPipeline,
+    # fit a copy of the original pipeline on train_df
+    if not isinstance(trained_pipeline, TransformPipeline):
+        trained_pipeline = TransformPipeline(transforms=pipeline.transforms)
+        trained_pipeline.fit(train_df, schema)
+    return (train_df, val_df, transformed_schema, preprocessing_meta,
+            trained_pipeline)
 
 
 def tune_tabddpm(
@@ -300,7 +332,6 @@ def tune_tabddpm(
         dataset: str,
         encoding_method: str,
         n_trials: int = 30,
-        epochs: int = 100,
         seed: int = 42,
         task_type: Optional[str] = None,
         holdout_cfg: Optional[SplitConfigHoldout] = None,
@@ -317,8 +348,6 @@ def tune_tabddpm(
     """
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0.")
-    if epochs <= 0:
-        raise ValueError("epochs must be > 0.")
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'.")
     encoding_method = _validate_encoding_method(encoding_method)
@@ -328,15 +357,25 @@ def tune_tabddpm(
             encoding_method))
     cfg = holdout_cfg or SplitConfigHoldout(val_size=0.2, shuffle=True,
                                             random_seed=5)
-    train_df, val_df, transformed_schema, preprocessing_meta = _build_holdout(
-        df=df,
-        schema=schema,
-        encoding_method=encoding_method,
-        task_type=task_type,
-        holdout_cfg=cfg,
-    )
+    train_df, val_df, transformed_schema, preprocessing_meta, pipeline = (
+        _build_holdout(
+            df=df,
+            schema=schema,
+            encoding_method=encoding_method,
+            task_type=task_type,
+            holdout_cfg=cfg,
+        ))
     is_regression = bool(
         preprocessing_meta["target_processing"]["is_regression"])
+
+    # WD-objective requires continuous columns; without them every trial
+    # scores 0.0 and Optuna degenerates to picking the first sampled point.
+    if not schema.continuous_cols:
+        print(
+            f"  No continuous columns in {dataset}; truncating Optuna to "
+            f"1 trial (WD objective is uninformative)."
+        )
+        n_trials = 1
 
     study_name = f"tabddpm_{_slug(dataset)}_{_slug(encoding_method)}"
     storage_uri = f"sqlite:///{(output_dir / 'study.sqlite3').as_posix()}"
@@ -349,18 +388,19 @@ def tune_tabddpm(
     )
 
     def objective(trial: optuna.Trial) -> float:
-        params = _suggest_tabddpm_params(trial, epochs=epochs, device=device)
+        params = _suggest_tabddpm_params(trial, device=device)
         model = TabDDPMGenerative(**params)
         try:
             model.fit(train_df, transformed_schema, source_schema=schema)
             synth_df = model.sample(len(val_df))
             score, details = _score_synthetic(
-                val_df=val_df,
-                synth_df=synth_df,
-                schema=transformed_schema,
+                val_processed=val_df,
+                synth_processed=synth_df,
+                schema_raw=schema,
+                pipeline=pipeline,
             )
             if not np.isfinite(score):
-                raise optuna.TrialPruned("Non‑finite score.")
+                raise optuna.TrialPruned("Non-finite score.")
             trial.set_user_attr("objective_metric", "wasserstein_mean")
             trial.set_user_attr("sample_size", int(len(val_df)))
             trial.set_user_attr("details", details)
@@ -371,13 +411,23 @@ def tune_tabddpm(
             raise optuna.TrialPruned(f"Trial failed: {exc}") from exc
 
     started_at = time.time()
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        timeout=timeout_seconds,
-        n_jobs=1,
-        show_progress_bar=False,
+    successful = sum(
+        1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
     )
+    while successful < n_trials:
+        # Run one trial at a time so we can check immediately when the
+        # target is reached
+        study.optimize(
+            objective,
+            n_trials=1,
+            timeout=timeout_seconds,
+            n_jobs=1,
+            show_progress_bar=False,
+        )
+        successful = sum(
+            1 for t in study.trials if
+            t.state == optuna.trial.TrialState.COMPLETE
+        )
     duration_seconds = time.time() - started_at
 
     if study.best_trial is None:
@@ -385,10 +435,10 @@ def tune_tabddpm(
 
     full_best_params = _suggest_tabddpm_params(
         trial=optuna.trial.FixedTrial(dict(study.best_trial.params)),
-        epochs=int(epochs),
         device=device,
     )
 
+    best_num_steps = full_best_params['num_steps']
     best_value = float(study.best_value)
     best_source = "stage1"
 
@@ -417,7 +467,7 @@ def tune_tabddpm(
         "best_value": best_value,
         "best_params": full_best_params,
         "n_trials": int(n_trials),
-        "epochs": int(epochs),
+        "steps": best_num_steps,
         "seed": int(seed),
         "task_type": "regression" if is_regression else "classification",
         "objective_metric": "wasserstein_mean",
@@ -445,7 +495,7 @@ def tune_tabddpm(
         best_params=full_best_params,
         best_source=best_source,
         n_trials=n_trials,
-        epochs=epochs,
+        steps=best_num_steps,
         duration_seconds=duration_seconds,
         summary_path=summary_path,
         trials_path=trials_path,
