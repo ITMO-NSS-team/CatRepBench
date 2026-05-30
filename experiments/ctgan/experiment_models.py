@@ -9,6 +9,8 @@ from experiments.tvae.tvae_common import DEFAULT_TVAE_EPOCHS, build_tvae_kwargs
 from experiments.tvae.tvae_tuning import estimate_tvae_runtime, select_tvae_best_params
 from experiments.tabddpm.tabddpm_common import DEFAULT_TABDDPM_NUM_STEPS, build_tabddpm_kwargs
 from experiments.tabddpm.tabddpm_tuning import estimate_tabddpm_runtime, select_tabddpm_best_params
+from experiments.tabpfgen.tabpfgen_common import DEFAULT_TABPFGEN_SGLD_STEPS, build_tabpfgen_kwargs
+from experiments.tabpfgen.tabpfgen_tuning import estimate_tabpfgen_runtime, select_tabpfgen_best_params
 from genbench.generative.base import BaseGenerative
 from genbench.generative.ctgan.ctgan import CtganGenerative
 from genbench.generative.tvae.tvae import TvaeGenerative
@@ -41,6 +43,17 @@ def _create_tabddpm(discrete_cols: list[str], model_kwargs: dict[str, Any]) -> B
     return TabDDPMGenerative(**model_kwargs)
 
 
+def _create_tabpfgen(discrete_cols: list[str], model_kwargs: dict[str, Any]) -> BaseGenerative:
+    # Lazy import: tabpfn/tabpfgen are optional heavy deps that may be absent.
+    # Importing the wrapper at module top level would break the entire registry
+    # (CTGAN/TVAE/TabDDPM all import this module). The wrapper infers feature
+    # types from the schema at fit-time, so it ignores discrete_cols; its flat
+    # dataclass kwargs come from build_tabpfgen_kwargs.
+    from genbench.generative.tabpfgen.tabpfgen import TabPFGenGenerative
+
+    return TabPFGenGenerative(**model_kwargs)
+
+
 _MODELS: dict[str, ExperimentModelSpec] = {
     "ctgan": ExperimentModelSpec(
         model_id="ctgan",
@@ -71,6 +84,16 @@ _MODELS: dict[str, ExperimentModelSpec] = {
         create_generative=_create_tabddpm,
         select_best_params=select_tabddpm_best_params,
         estimate_runtime=estimate_tabddpm_runtime,
+    ),
+    "tabpfgen": ExperimentModelSpec(
+        model_id="tabpfgen",
+        display_name="TabPFGen",
+        artifact_filename="tabpfgen.pkl",
+        default_epochs=DEFAULT_TABPFGEN_SGLD_STEPS,
+        build_model_kwargs=build_tabpfgen_kwargs,
+        create_generative=_create_tabpfgen,
+        select_best_params=select_tabpfgen_best_params,
+        estimate_runtime=estimate_tabpfgen_runtime,
     ),
 }
 
