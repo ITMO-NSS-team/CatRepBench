@@ -493,7 +493,7 @@ def tune_tabddpm(
         "steps": best_num_steps,
         "seed": int(seed),
         "task_type": "regression" if is_regression else "classification",
-        "objective_metric": "wasserstein_mean",
+        "objective_metric": "wasserstein_mean" if schema.continuous_cols else "marginal_kl_mean",
         "objective_direction": "minimize",
         "holdout": {
             "val_size": float(cfg.val_size),
