@@ -372,14 +372,10 @@ def tune_tabddpm(
     is_regression = bool(
         preprocessing_meta["target_processing"]["is_regression"])
 
-    # WD-objective requires continuous columns; without them every trial
-    # scores 0.0 and Optuna degenerates to picking the first sampled point.
-    if not schema.continuous_cols:
-        print(
-            f"  No continuous columns in {dataset}; truncating Optuna to "
-            f"1 trial (WD objective is uninformative)."
-        )
-        n_trials = 1
+    # Run the full Optuna budget for every dataset — parity with the CTGAN/TVAE
+    # tuners, which do not truncate for categorical-only datasets. (The WD
+    # objective is flat there, but a truncated single-trial run is not the full
+    # pipeline and diverges from how the other models are tuned.)
 
     study_name = f"tabddpm_{_slug(dataset)}_{_slug(encoding_method)}"
     storage_uri = f"sqlite:///{(output_dir / 'study.sqlite3').as_posix()}"
