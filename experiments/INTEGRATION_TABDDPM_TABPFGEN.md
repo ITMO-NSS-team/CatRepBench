@@ -58,10 +58,35 @@ TabPFGen); pass `--skip-tuning --best-params-file <json>` to reuse params.
 - `tests/test_tabddpm_roundtrip.py` passes (non-default arch reload).
 - Registry imports with `tabpfn` absent; all four model specs resolve.
 
+## Making the model tabs appear in the table + web monitor
+The orchestrator (`ctgan_orchestrator.py --worksheet <tab> --model-id <model>`) is
+already model-agnostic, but it only *writes into* an existing tab — it never
+creates one. The CTGAN/TVAE status tabs were made by hand, so a new model has no
+tab and nothing shows up in the table or the monitor. Create the tab first:
+```bash
+# preview (no sheet changes)
+python -m experiments.ctgan.orchestrator_staff.bootstrap_model_worksheet \
+    --worksheet TabDDPM --dry-run
+# create the empty dataset x encoder grid (all cells = pending)
+python -m experiments.ctgan.orchestrator_staff.bootstrap_model_worksheet --worksheet TabDDPM
+python -m experiments.ctgan.orchestrator_staff.bootstrap_model_worksheet --worksheet TabPFGen
+```
+The grid is built straight from the manifest (22 datasets x 12 encoders) and is
+verified to pass the orchestrator's own `validate_worksheet_headers`. Then run the
+orchestrator with `--worksheet TabDDPM --model-id tabddpm` to populate cells.
+
+The **web monitor** (separate repo `ctgan-monitor-railway`) reads these tabs; it
+needs the new worksheet names + model keys registered so the new model views
+appear on the site. That is a code change in that repo (not auto-discovered).
+
 ## Not done (needs you / a GPU cluster / credentials)
 - The full grid run (compute) — launch on the cluster with `--device cuda`.
 - TabPFGen actual run — needs `HF_TOKEN` + accepted gates.
-- Per-model Sheets status worksheets (`TabDDPM`/`TabPFGen`) + Drive mirror, if you
-  want the matrix/monitor populated for the new models (the per-cell runner already
-  emits the right artifacts; the orchestrator/Sheets wiring is the remaining piece).
+- **Create the `TabDDPM`/`TabPFGen` tabs** by running `bootstrap_model_worksheet`
+  above from a host where the Sheets API is reachable. NOTE: this Claude session
+  cannot do it — `sheets.googleapis.com` is blocked at the network level here
+  (confirmed: times out with and without the sandbox; `oauth2.googleapis.com`
+  resolves so auth succeeds then gspread hangs on the values call).
+- **Web monitor model views** for TabDDPM/TabPFGen — blocked from this session by
+  macOS TCC on the monitor repo (`Operation not permitted`).
 - Methodology call on continuous-WD instability for TabDDPM.
