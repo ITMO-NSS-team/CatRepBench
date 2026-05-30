@@ -254,6 +254,15 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         else:
             raise NotImplementedError
 
+        if clip_denoised:
+            # Static thresholding: project the predicted x0 back onto the data
+            # support at each reverse step. The numerical inputs are
+            # quantile->normal (~N(0,1), bounded ~±5 by the transform), so a ±5
+            # clamp stabilizes the Gaussian reverse process and prevents
+            # divergence to NaN/Inf for wide-range encoded inputs (standard
+            # DDPM/Imagen practice; this clip was previously a no-op).
+            pred_xstart = pred_xstart.clamp(-5.0, 5.0)
+
         model_mean, _, _ = self.gaussian_q_posterior_mean_variance(
             x_start=pred_xstart, x_t=x, t=t
         )
@@ -870,7 +879,7 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
             model_out_num = model_out[:, :self.num_numerical_features]
             model_out_cat = model_out[:, self.num_numerical_features:]
             z_norm = self.gaussian_ddim_step(model_out_num, z_norm, t,
-                                             clip_denoised=False)
+                                             clip_denoised=True)
             if has_cat:
                 log_z = self.multinomial_ddim_step(model_out_cat, log_z, t,
                                                    out_dict)
@@ -911,7 +920,7 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
             model_out_num = model_out[:, :self.num_numerical_features]
             model_out_cat = model_out[:, self.num_numerical_features:]
             z_norm = self.gaussian_p_sample(model_out_num, z_norm, t,
-                                            clip_denoised=False)['sample']
+                                            clip_denoised=True)['sample']
             if has_cat:
                 log_z = self.p_sample(model_out_cat, log_z, t, out_dict)
 
