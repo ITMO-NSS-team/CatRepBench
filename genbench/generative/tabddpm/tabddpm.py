@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.preprocessing import QuantileTransformer
 
 from genbench.data.schema import TabularSchema
 from genbench.generative.base import BaseGenerative, GenerativeState
@@ -164,6 +165,12 @@ class TabDDPMGenerative(BaseGenerative):
     numerical_cols_: List[str] = field(default_factory=list)
     categorical_cols_: List[str] = field(default_factory=list)
     column_order_: List[str] = field(default_factory=list)
+    # Quantile->normal normalizer for the numerical (Gaussian-diffusion) inputs.
+    # TabDDPM's reference recipe normalizes numericals with a Gaussian quantile
+    # transform whose inverse saturates to the training range, which bounds the
+    # synthetic samples. Without it (e.g. plain standardization), the reverse
+    # diffusion can drift to extreme values that survive the linear inverse.
+    num_normalizer_: Any = None
 
     # target info - target is always modeled as part of X
     target_col_: Optional[str] = None
@@ -229,11 +236,23 @@ class TabDDPMGenerative(BaseGenerative):
         self.column_order_ = self.numerical_cols_ + self.categorical_cols_
         self.num_numerical_features_ = len(self.numerical_cols_)
 
-        # Process numerical features
+        # Process numerical features. Fit a Gaussian quantile transform and feed
+        # the diffusion the normalized values; sampling inverts it (see
+        # _build_dataframe), so synthetic numericals stay within the training
+        # range instead of drifting to extreme outliers.
         if self.numerical_cols_:
             num_data = df[self.numerical_cols_].values.astype(np.float32)
+            n_q = max(min(num_data.shape[0] // 30, 1000), 10)
+            self.num_normalizer_ = QuantileTransformer(
+                output_distribution="normal",
+                n_quantiles=min(n_q, num_data.shape[0]),
+                subsample=10 ** 9,
+                random_state=0,
+            )
+            num_data = self.num_normalizer_.fit_transform(num_data).astype(np.float32)
         else:
             num_data = np.zeros((len(df), 0), dtype=np.float32)
+            self.num_normalizer_ = None
 
         # Process categorical features
         if self.categorical_cols_:
@@ -459,9 +478,12 @@ class TabDDPMGenerative(BaseGenerative):
         n_num = self.num_numerical_features_
         n_cat = len(self.num_classes_) if self.num_classes_[0] > 0 else 0
 
-        # Numerical features
+        # Numerical features. Invert the Gaussian quantile transform so values
+        # are mapped back into the training range (bounds outlier drift).
         if n_num > 0:
             num_data = X[:, :n_num]
+            if self.num_normalizer_ is not None:
+                num_data = self.num_normalizer_.inverse_transform(num_data)
             for i, col in enumerate(self.column_order_[:n_num]):
                 data[col] = num_data[:, i]
 
@@ -600,6 +622,7 @@ class TabDDPMGenerative(BaseGenerative):
                     "numerical_cols": self.numerical_cols_,
                     "categorical_cols": self.categorical_cols_,
                     "column_order": self.column_order_,
+                    "num_normalizer": self.num_normalizer_,
                     "target_col": self.target_col_,
                     "loss_history": self.loss_history_,
                     "fitted": self.fitted_,
@@ -659,6 +682,7 @@ class TabDDPMGenerative(BaseGenerative):
         obj.numerical_cols_ = payload.get("numerical_cols", [])
         obj.categorical_cols_ = payload.get("categorical_cols", [])
         obj.column_order_ = payload.get("column_order", [])
+        obj.num_normalizer_ = payload.get("num_normalizer", None)
         obj.target_col_ = payload.get("target_col")
         obj.loss_history_ = payload.get("loss_history", [])
         obj.fitted_ = payload.get("fitted", False)
