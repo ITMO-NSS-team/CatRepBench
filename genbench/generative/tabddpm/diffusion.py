@@ -135,12 +135,15 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod - 1)
 
         # Gaussian diffusion
-        self.posterior_variance = (
+        # Computed in float64 for numerical precision, then stored as float32
+        # so the diffusion math stays MPS-safe (MPS does not support float64).
+        posterior_variance = (
                 betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         )
+        self.posterior_variance = posterior_variance.float().to(device)
         self.posterior_log_variance_clipped = torch.from_numpy(
-            np.log(np.append(self.posterior_variance[1],
-                             self.posterior_variance[1:]))
+            np.log(np.append(posterior_variance[1].numpy(),
+                             posterior_variance[1:].numpy()))
         ).float().to(device)
         self.posterior_mean_coef1 = (
                 betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)

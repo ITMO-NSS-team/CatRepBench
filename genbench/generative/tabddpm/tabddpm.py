@@ -586,10 +586,15 @@ class TabDDPMGenerative(BaseGenerative):
                 path / "model_ema.pt"
             )
 
-        # Save metadata (named to match ExperimentModelSpec.artifact_filename)
+        # Save metadata (named to match ExperimentModelSpec.artifact_filename).
+        # "params" persists ALL constructor/architecture hyperparameters
+        # (d_layers, dim_t, num_timesteps, dropout, scheduler, ...) so
+        # load_artifacts can rebuild the exact architecture before
+        # load_state_dict, instead of falling back to dataclass defaults.
         with open(path / "tabddpm.pkl", "wb") as f:
             pickle.dump(
                 {
+                    "params": self.get_state().params,
                     "num_numerical_features": self.num_numerical_features_,
                     "num_classes": self.num_classes_,
                     "numerical_cols": self.numerical_cols_,
@@ -634,7 +639,21 @@ class TabDDPMGenerative(BaseGenerative):
         with open(artifacts_path, "rb") as f:
             payload = pickle.load(f)
 
-        obj = cls()
+        # Reconstruct the EXACT architecture from the persisted params (d_layers,
+        # dim_t, num_timesteps, dropout, scheduler, ...) so load_state_dict matches
+        # non-default configs; reload onto the locally-available device (cuda->mps->cpu)
+        # so artifacts trained on a GPU cluster can be reloaded anywhere.
+        params = dict(payload.get("params") or {})
+        if params:
+            if torch.cuda.is_available():
+                params["device"] = "cuda"
+            elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+                params["device"] = "mps"
+            else:
+                params["device"] = "cpu"
+            obj = cls.from_state(GenerativeState(name="tabddpm", params=params))
+        else:
+            obj = cls()
         obj.num_numerical_features_ = payload.get("num_numerical_features", 0)
         obj.num_classes_ = payload.get("num_classes", np.array([0]))
         obj.numerical_cols_ = payload.get("numerical_cols", [])

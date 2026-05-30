@@ -12,4 +12,5 @@ datasets/raw/*.csv
 *.env
 gsheets-service-account.json
 *service_account*.json
-oauth_token.json
+oauth_token.jsoncatboost_info/
+experiments/results/
