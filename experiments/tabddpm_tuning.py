@@ -47,6 +47,8 @@ from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigHoldout
 from genbench.evaluation.distribution.wasserstein import \
     WassersteinDistanceMetric
+from genbench.evaluation.distribution.marginal_kl import \
+    MarginalKLDivergenceMetric
 from genbench.evaluation.pipeline.single_run import \
     DistributionEvaluationPipeline
 from genbench.transforms.categorical import (
@@ -204,32 +206,50 @@ def _score_synthetic(
         synth_processed: pd.DataFrame,
         schema_raw: TabularSchema,
         pipeline: TransformPipeline,
+        transformed_schema: Optional[TabularSchema] = None,
 ) -> tuple[float, Dict[str, float]]:
-    scaler = None
-    for tr in pipeline.transforms:
-        if getattr(tr, 'name', '') == 'continuous_standard_scaler':
-            scaler = tr
-            break
+    # Adaptive objective. Datasets with continuous columns are scored by
+    # Wasserstein on the raw continuous columns (parity with CTGAN/TVAE).
+    # Categorical-only datasets have a structurally-zero WD, so they are scored
+    # by marginal-KL on the encoded data with the transformed schema — the same
+    # quantity the benchmark reports as ``marginal_kl_mean`` and well-defined for
+    # every encoder (no inverse-transform/decode required).
+    if schema_raw.continuous_cols:
+        scaler = None
+        for tr in pipeline.transforms:
+            if getattr(tr, 'name', '') == 'continuous_standard_scaler':
+                scaler = tr
+                break
 
-    if scaler is not None and scaler.fitted_ and scaler.continuous_cols_:
-        val_raw = scaler.inverse_transform(val_processed)
-        synth_raw = scaler.inverse_transform(synth_processed)
+        if scaler is not None and scaler.fitted_ and scaler.continuous_cols_:
+            val_raw = scaler.inverse_transform(val_processed)
+            synth_raw = scaler.inverse_transform(synth_processed)
+        else:
+            val_raw = val_processed
+            synth_raw = synth_processed
+
+        dist_pipeline = DistributionEvaluationPipeline(
+            metrics=[WassersteinDistanceMetric(include_discrete=False)]
+        )
+        dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
+                                             schema=schema_raw).scores
+        key = "wasserstein_mean"
     else:
-        val_raw = val_processed
-        synth_raw = synth_processed
+        schema_for_kl = transformed_schema if transformed_schema is not None else schema_raw
+        dist_pipeline = DistributionEvaluationPipeline(
+            metrics=[MarginalKLDivergenceMetric()]
+        )
+        dist_scores = dist_pipeline.evaluate(real=val_processed, synth=synth_processed,
+                                             schema=schema_for_kl).scores
+        key = "marginal_kl_mean"
 
-    dist_pipeline = DistributionEvaluationPipeline(
-        metrics=[WassersteinDistanceMetric(include_discrete=False)]
-    )
-    dist_scores = dist_pipeline.evaluate(real=val_raw, synth=synth_raw,
-                                         schema=schema_raw).scores
-    wd = float(dist_scores.get("wasserstein_mean", np.nan))
-
+    score = float(dist_scores.get(key, np.nan))
     details = {
-        "objective_score": wd,
-        "wasserstein_mean": wd,
+        "objective_score": score,
+        "objective_metric": key,
+        key: score,
     }
-    return wd, details
+    return score, details
 
 
 def _build_holdout(
@@ -398,10 +418,11 @@ def tune_tabddpm(
                 synth_processed=synth_df,
                 schema_raw=schema,
                 pipeline=pipeline,
+                transformed_schema=transformed_schema,
             )
             if not np.isfinite(score):
                 raise optuna.TrialPruned("Non-finite score.")
-            trial.set_user_attr("objective_metric", "wasserstein_mean")
+            trial.set_user_attr("objective_metric", details.get("objective_metric", "wasserstein_mean"))
             trial.set_user_attr("sample_size", int(len(val_df)))
             trial.set_user_attr("details", details)
             return float(score)

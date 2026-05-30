@@ -130,6 +130,7 @@ def estimate_tabddpm_runtime(
         synth_processed=synth_df,
         schema_raw=schema,
         pipeline=pipeline,
+        transformed_schema=transformed_schema,
     )
     post_fit_seconds = float(time.monotonic() - post_fit_started_at)
 
