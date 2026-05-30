@@ -416,13 +416,20 @@ def _compute_tstr_scores(
     if transformed_schema.target_col is None:
         return {"status": "unsupported_no_target"}
 
-    scores = tstr_catboost(
-        train_real=train_df,
-        test_real=test_df,
-        synth_train=synth_df,
-        schema=transformed_schema,
-        task_type=_task_type_from_flag(is_regression),
-    )
+    try:
+        scores = tstr_catboost(
+            train_real=train_df,
+            test_real=test_df,
+            synth_train=synth_df,
+            schema=transformed_schema,
+            task_type=_task_type_from_flag(is_regression),
+        )
+    except Exception as exc:  # noqa: BLE001 - a degenerate synthetic target (e.g. a
+        # collapsed/constant target the classifier/regressor can't train on, which raises
+        # CatBoost "All train targets are equal") must NOT fail the whole cell: the
+        # distribution metrics are still valid. Record the failure and continue; the
+        # aggregation already drops non-"ok" utility folds.
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"[:300]}
     return {"status": "ok", **scores}
 
 
