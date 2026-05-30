@@ -825,20 +825,39 @@ def run_full_ctgan_experiment(
         n_folds = 1
     else:
         for fold_id in range(5):
-            fold_payload = _run_crossval_fold(
-                fold_id=fold_id,
-                df=df,
-                schema=schema,
-                encoding_method=encoding_method,
-                best_params=dict(tuning_result["best_params"]),
-                model_spec=model_spec,
-                device=device,
-                is_regression=is_regression,
-                artifacts_dir=artifacts_dir,
-            )
+            try:
+                fold_payload = _run_crossval_fold(
+                    fold_id=fold_id,
+                    df=df,
+                    schema=schema,
+                    encoding_method=encoding_method,
+                    best_params=dict(tuning_result["best_params"]),
+                    model_spec=model_spec,
+                    device=device,
+                    is_regression=is_regression,
+                    artifacts_dir=artifacts_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 - a fold whose sampling diverges
+                # (e.g. FoundNANsError after the bounded retries) must not crash the
+                # whole cell. Skip it and aggregate over the folds that succeeded; if
+                # none survive, the clean error below records the cell as failed.
+                _emit_progress(
+                    stage="crossval",
+                    message=f"fold {fold_id} failed, skipping: {type(exc).__name__}: {exc}"[:200],
+                    progress_stream=progress_stream,
+                    progress_format=progress_format,
+                    dataset_id=dataset_id,
+                    encoding_method=encoding_method,
+                    **progress_model,
+                )
+                continue
             fold_results.append(fold_payload)
             _save_json(per_fold_dir / f"fold_{fold_id}.json", fold_payload)
-        n_folds = 5
+        n_folds = len(fold_results)
+        if n_folds == 0:
+            raise RuntimeError(
+                "All cross-validation folds failed (persistent NaN/Inf in sampling)"
+            )
 
     _emit_progress(
         stage="metrics",
