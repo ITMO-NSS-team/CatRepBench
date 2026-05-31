@@ -944,14 +944,9 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
         all_samples = []
         num_generated = 0
         total_attempts = 0
+        wasted_attempts = 0
 
         while num_generated < num_samples:
-            if total_attempts >= max_total_attempts:
-                raise FoundNANsError(
-                    f"Exceeded maximum total attempts ({max_total_attempts}) "
-                    f"due to persistent NaN/Inf in generated batches."
-                )
-
             sample, out_dict = sample_fn(b, y_dist)
             total_attempts += 1
 
@@ -969,9 +964,15 @@ class GaussianMultinomialDiffusion(torch.nn.Module):
                 out_dict['y'] = out_dict['y'][~mask_nan]
 
             if sample.shape[0] == 0:
-                continue  # entire batch is bad - another attempt (if limit
-                # not exceeded)
+                wasted_attempts += 1
+                if wasted_attempts >= max_total_attempts:
+                    raise FoundNANsError(
+                        f"Exceeded {max_total_attempts} consecutive batches "
+                        f"with only NaN/Inf rows during sampling."
+                    )
+                continue  # entire batch all-NaN - retry (counts toward cap)
 
+            wasted_attempts = 0
             all_samples.append(sample)
             all_y.append(out_dict['y'].cpu())
             num_generated += sample.shape[0]
