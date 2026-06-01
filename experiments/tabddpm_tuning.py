@@ -435,7 +435,12 @@ def tune_tabddpm(
     successful = sum(
         1 for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
     )
-    while successful < n_trials:
+    # Bound the total trial count so a cell whose objective is non-finite or
+    # errors on every trial (e.g. polynomial encoding overflowing on a
+    # high-cardinality categorical) fails cleanly instead of looping forever:
+    # every such trial is PRUNED, so `successful` would never reach n_trials.
+    max_attempts = max(3 * n_trials, 60)
+    while successful < n_trials and len(study.trials) < max_attempts:
         # Run one trial at a time so we can check immediately when the
         # target is reached
         if progress_callback is not None:
@@ -453,6 +458,12 @@ def tune_tabddpm(
         )
     duration_seconds = time.time() - started_at
 
+    if successful == 0:
+        raise RuntimeError(
+            f"No successful Optuna trials after {len(study.trials)} attempts "
+            "(objective non-finite or erroring on every trial - e.g. encoding "
+            "overflow on a high-cardinality categorical)."
+        )
     if study.best_trial is None:
         raise RuntimeError("No successful Optuna trials.")
 
