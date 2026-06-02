@@ -38,3 +38,51 @@ Recommendation:
 - Forest_Fires **distribution** metrics (WD, KL, correlation) remain valid.
 - More generally, any dataset whose real-data TSTR R² is ≤ 0 has no utility
   signal and should be handled the same way.
+
+## Polynomial encoding: predictive champion vs generative liability
+
+In the predictive encoding benchmark of **Clerici & Nobani (2026, IJDSA
+s41060-025-00886-w)**, the **polynomial** (trend) contrast is the single best
+unsupervised encoder — top F1 for MLP/SVM/LR/DT and top RMSE for RF/K-NN/SVM/DT
+(though its Wilcoxon advantage over one-hot is often not significant). In OUR
+**generative** setting it is the opposite — a liability:
+- On high-cardinality categoricals it **overflows numerically** (patsy
+  `scores ** arange(n)`, `RuntimeWarning: overflow encountered in power`).
+  `Seoul_Bike_Sharing_Demand` has a ~365-level `Date` column → polynomial
+  expands to 379 columns with inf/NaN → no Optuna trial completes → the cell
+  fails. **TVAE fails on the same cell too**, confirming it is the encoding, not
+  the model.
+- Takeaway for the paper: encoder quality does **not** transfer between
+  predictive and generative tasks. A contrast designed to expose monotone trends
+  for a downstream predictor is numerically ill-posed as a generative target on
+  high-cardinality nominal features.
+
+## `frequency` encoding diverges to NaN on large datasets (it is `count`, not relative)
+
+`FrequencyRepresentation` defaults to `method="count"` — **absolute counts**, not
+the standard relative frequency. On large datasets these are huge (e.g.
+bank-marketing encoded columns reach **35 496**). Even after standardization +
+quantile-normal transform, the Gaussian diffusion **sampling diverges to NaN**
+(`FoundNANsError`: 10 consecutive all-NaN batches), so every Optuna trial is
+pruned and the cell fails (now cleanly, after the tuning-loop cap). The model
+trains fine — the failure is in sampling.
+- The class already supports `method="normalized"` (count ÷ total → values in
+  [0,1]). Switching to it would both **match the textbook definition** of
+  frequency encoding and **remove the divergence** (small magnitudes).
+- **Decision for Ilya** (changes all `frequency` results, so not done
+  automatically): adopt `normalized`, or keep `count` and report these large
+  datasets as known frequency failures.
+
+## Loss graphs missing for TVAE in the dashboard — data was never uploaded to Drive
+
+TVAE loss curves do not render because the monitor has **0 `loss_series` for
+tvae**: tvae's Drive folders contain only `crossval/ metrics/ tuning/
+run_summary.json` — **no `artifacts/` directory** (where `loss_history.csv`
+lives), whereas tabddpm/ctgan uploaded `artifacts/`. The loss CSVs **do exist
+locally on the cluster** (`experiments/results/tvae/*/*/artifacts/fold_*/loss_history.csv`,
+815 files), so the data is real — it was just never uploaded to Drive for tvae.
+- Fix options (need Ilya's ok, both touch infra): (a) backfill the monitor's
+  Postgres `loss_series` for tvae from the local CSVs, or (b) upload tvae's
+  `artifacts/` to Drive and let the normal sync pull them. The monitor code
+  path is already fixed (`loss_histories` is sourced from `loss_series` →
+  commit `c377c44`); it just has nothing to show for tvae.
