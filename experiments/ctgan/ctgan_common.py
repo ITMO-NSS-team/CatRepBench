@@ -15,6 +15,10 @@ from genbench.transforms.pipeline import TransformPipeline
 from genbench.transforms.target import TargetTypePreprocessor
 
 DEFAULT_CTGAN_EPOCHS = 300
+# Tuning trials only proxy-rank hyperparameters; final fold models still train
+# with DEFAULT_CTGAN_EPOCHS. 300-epoch trials made one cell = 35 full trainings.
+DEFAULT_CTGAN_TUNING_EPOCHS = 50
+DEFAULT_TUNING_MAX_ROWS = 20_000
 
 
 def _validate_device(device: str) -> str:

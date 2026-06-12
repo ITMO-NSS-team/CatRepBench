@@ -136,7 +136,7 @@ def test_tune_ctgan_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert any(col.startswith("x_cat__") for col in DummyCtganGenerative.created[0].train_df.columns)
 
 
-def test_tune_ctgan_uses_300_epochs_by_default(tmp_path, monkeypatch):
+def test_tune_ctgan_uses_reduced_tuning_epochs_by_default(tmp_path, monkeypatch):
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []
 
@@ -151,7 +151,66 @@ def test_tune_ctgan_uses_300_epochs_by_default(tmp_path, monkeypatch):
     )
 
     assert DummyCtganGenerative.created
-    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 300
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 50
+
+
+def test_tune_ctgan_default_tuning_row_cap_is_20k():
+    import inspect
+
+    default = inspect.signature(tune_mod.tune_ctgan).parameters["max_tuning_rows"].default
+    assert default == 20_000
+
+
+def test_tune_ctgan_caps_tuning_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+
+    result = tune_mod.tune_ctgan(
+        df=_build_df(n=80),
+        schema=_build_schema(),
+        dataset="capped",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=1,
+        max_tuning_rows=30,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+    )
+
+    assert DummyCtganGenerative.created
+    train_df = DummyCtganGenerative.created[0].train_df
+    assert train_df is not None
+    assert len(train_df) == 24  # 80% of the 30-row tuning cap
+
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert payload["max_tuning_rows"] == 30
+    assert payload["n_rows_tuning"] == 30
+
+
+def test_tune_ctgan_row_cap_disabled_with_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
+    DummyCtganGenerative.created = []
+
+    result = tune_mod.tune_ctgan(
+        df=_build_df(n=80),
+        schema=_build_schema(),
+        dataset="uncapped",
+        encoding_method="one_hot_representation",
+        n_trials=1,
+        epochs=1,
+        max_tuning_rows=None,
+        output_root=tmp_path / "optuna_results",
+        device="cpu",
+    )
+
+    assert DummyCtganGenerative.created
+    train_df = DummyCtganGenerative.created[0].train_df
+    assert train_df is not None
+    assert len(train_df) == 64  # 80% of all 80 rows
+
+    payload = json.loads(result.summary_path.read_text(encoding="utf-8"))
+    assert payload["max_tuning_rows"] is None
+    assert payload["n_rows_tuning"] == 80
 
 
 def test_tune_ctgan_save_model_uses_wrapper_artifacts(tmp_path, monkeypatch):

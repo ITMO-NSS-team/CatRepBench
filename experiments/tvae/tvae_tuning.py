@@ -25,10 +25,15 @@ import optuna
 import pandas as pd
 
 from experiments.ctgan.ctgan_common import (
+    DEFAULT_TUNING_MAX_ROWS,
     build_preprocess_pipeline,
     default_discrete_cols,
 )
-from experiments.tvae.tvae_common import DEFAULT_TVAE_EPOCHS, build_tvae_kwargs
+from experiments.tvae.tvae_common import (
+    DEFAULT_TVAE_EPOCHS,
+    DEFAULT_TVAE_TUNING_EPOCHS,
+    build_tvae_kwargs,
+)
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigHoldout
@@ -80,6 +85,12 @@ def _save_json(path: Path, payload: Dict[str, Any]) -> None:
 
 def _slug(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name).strip()).strip("_") or "unknown"
+
+
+def _cap_tuning_rows(df: pd.DataFrame, *, max_rows: int | None) -> pd.DataFrame:
+    if max_rows is None or len(df) <= max_rows:
+        return df
+    return df.sample(n=max_rows, random_state=42).sort_index().reset_index(drop=True)
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -362,7 +373,7 @@ def tune_tvae(
     dataset: str,
     encoding_method: str,
     n_trials: int = 30,
-    epochs: int = DEFAULT_TVAE_EPOCHS,
+    epochs: int = DEFAULT_TVAE_TUNING_EPOCHS,
     seed: int = 42,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
@@ -373,6 +384,7 @@ def tune_tvae(
     timeout_seconds: Optional[int] = None,
     device: str = "cuda",
     progress_callback: Callable[[str], None] | None = None,
+    max_tuning_rows: int | None = DEFAULT_TUNING_MAX_ROWS,
 ) -> TvaeTuningResult:
     if n_trials <= 0:
         raise ValueError("n_trials must be > 0.")
@@ -380,7 +392,10 @@ def tune_tvae(
         raise ValueError("epochs must be > 0.")
     if device not in {"cpu", "cuda"}:
         raise ValueError("device must be 'cpu' or 'cuda'.")
+    if max_tuning_rows is not None and max_tuning_rows <= 1:
+        raise ValueError("max_tuning_rows must be > 1 or None.")
 
+    df = _cap_tuning_rows(df, max_rows=max_tuning_rows)
     cfg = holdout_cfg or SplitConfigHoldout(val_size=0.2, shuffle=True, random_seed=5)
     train_df, val_df, transformed_schema, preprocessing_meta = _build_holdout(
         df=df,
@@ -509,6 +524,8 @@ def tune_tvae(
         "n_trials": int(n_trials),
         "epochs": int(epochs),
         "seed": int(seed),
+        "max_tuning_rows": max_tuning_rows,
+        "n_rows_tuning": int(len(df)),
         "task_type": "regression" if is_regression else "classification",
         "used_discrete_cols": used_discrete_cols,
         "objective_metric": "wasserstein_mean",
@@ -553,7 +570,9 @@ def estimate_tvae_runtime(
     encoding_method: str,
     sample_epochs: int = 10,
     projected_epochs: int = DEFAULT_TVAE_EPOCHS,
-    projected_total_runs: int = 35,
+    # 30 tuning trials at DEFAULT_TVAE_TUNING_EPOCHS (50/300 of a full run)
+    # + 5 folds at full epochs ~= 10 full-epoch-equivalent runs.
+    projected_total_runs: int = 10,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
     discrete_cols: Optional[Sequence[str]] = None,
