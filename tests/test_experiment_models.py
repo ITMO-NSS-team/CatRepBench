@@ -6,7 +6,7 @@ from genbench.generative.tvae.tvae import TvaeGenerative
 
 
 def test_registry_lists_ctgan_and_tvae():
-    assert list_experiment_models() == ("ctgan", "tvae")
+    assert list_experiment_models() == ("ctgan", "tvae", "tabddpm", "tabpfgen")
 
 
 def test_registry_resolves_ctgan_contract():
