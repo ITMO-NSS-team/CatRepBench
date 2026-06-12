@@ -15,9 +15,9 @@ from genbench.transforms.pipeline import TransformPipeline
 from genbench.transforms.target import TargetTypePreprocessor
 
 DEFAULT_CTGAN_EPOCHS = 300
-# Tuning trials only proxy-rank hyperparameters; final fold models still train
-# with DEFAULT_CTGAN_EPOCHS. 300-epoch trials made one cell = 35 full trainings.
-DEFAULT_CTGAN_TUNING_EPOCHS = 50
+# Cap applied to the tuning dataframe only; final fold training always uses
+# the full dataset. Bounds the cost of the 30 full-epoch tuning trials on
+# large datasets.
 DEFAULT_TUNING_MAX_ROWS = 20_000
 
 

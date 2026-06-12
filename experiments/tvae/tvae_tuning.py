@@ -29,11 +29,7 @@ from experiments.ctgan.ctgan_common import (
     build_preprocess_pipeline,
     default_discrete_cols,
 )
-from experiments.tvae.tvae_common import (
-    DEFAULT_TVAE_EPOCHS,
-    DEFAULT_TVAE_TUNING_EPOCHS,
-    build_tvae_kwargs,
-)
+from experiments.tvae.tvae_common import DEFAULT_TVAE_EPOCHS, build_tvae_kwargs
 from genbench.data.datamodule import TabularDataModule
 from genbench.data.schema import TabularSchema
 from genbench.data.splits import SplitConfigHoldout
@@ -373,7 +369,7 @@ def tune_tvae(
     dataset: str,
     encoding_method: str,
     n_trials: int = 30,
-    epochs: int = DEFAULT_TVAE_TUNING_EPOCHS,
+    epochs: int = DEFAULT_TVAE_EPOCHS,
     seed: int = 42,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
@@ -570,9 +566,7 @@ def estimate_tvae_runtime(
     encoding_method: str,
     sample_epochs: int = 10,
     projected_epochs: int = DEFAULT_TVAE_EPOCHS,
-    # 30 tuning trials at DEFAULT_TVAE_TUNING_EPOCHS (50/300 of a full run)
-    # + 5 folds at full epochs ~= 10 full-epoch-equivalent runs.
-    projected_total_runs: int = 10,
+    projected_total_runs: int = 35,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
     discrete_cols: Optional[Sequence[str]] = None,

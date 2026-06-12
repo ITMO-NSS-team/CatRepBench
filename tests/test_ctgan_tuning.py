@@ -136,7 +136,9 @@ def test_tune_ctgan_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert any(col.startswith("x_cat__") for col in DummyCtganGenerative.created[0].train_df.columns)
 
 
-def test_tune_ctgan_uses_reduced_tuning_epochs_by_default(tmp_path, monkeypatch):
+def test_tune_ctgan_uses_full_300_epochs_by_default(tmp_path, monkeypatch):
+    # Tuning budget must match final fold training (DEFAULT_CTGAN_EPOCHS):
+    # params selected at a smaller budget would not transfer.
     monkeypatch.setattr(tune_mod, "CtganGenerative", DummyCtganGenerative)
     DummyCtganGenerative.created = []
 
@@ -151,7 +153,7 @@ def test_tune_ctgan_uses_reduced_tuning_epochs_by_default(tmp_path, monkeypatch)
     )
 
     assert DummyCtganGenerative.created
-    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 50
+    assert DummyCtganGenerative.created[0].ctgan_kwargs["epochs"] == 300
 
 
 def test_tune_ctgan_default_tuning_row_cap_is_20k():

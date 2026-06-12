@@ -11,8 +11,9 @@ Available tune_ctgan flags:
 - encoding_method (str): Representation id. Must be one of
   `genbench.transforms.categorical.list_registered_representations()`.
 - n_trials (int, default=30): Optuna trial budget.
-- epochs (int, default=50): CTGAN epochs per trial. Final fold models are
-  trained separately with DEFAULT_CTGAN_EPOCHS by the full experiment runner.
+- epochs (int, default=300): CTGAN epochs per trial. Deliberately equals
+  DEFAULT_CTGAN_EPOCHS (the final fold-training budget) so tuned params
+  transfer; do not lower it to speed up tuning.
 - max_tuning_rows (Optional[int], default=20000): Deterministic row cap applied
   to the tuning dataframe before the holdout split. Final fold training uses
   the full dataset. None disables the cap.
@@ -55,7 +56,6 @@ import pandas as pd
 
 from experiments.ctgan.ctgan_common import (
     DEFAULT_CTGAN_EPOCHS,
-    DEFAULT_CTGAN_TUNING_EPOCHS,
     DEFAULT_TUNING_MAX_ROWS,
     build_ctgan_kwargs,
     build_preprocess_pipeline,
@@ -518,7 +518,7 @@ def tune_ctgan(
     dataset: str,
     encoding_method: str,
     n_trials: int = 30,
-    epochs: int = DEFAULT_CTGAN_TUNING_EPOCHS,
+    epochs: int = DEFAULT_CTGAN_EPOCHS,
     seed: int = 42,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
@@ -723,9 +723,7 @@ def estimate_ctgan_runtime(
     encoding_method: str,
     sample_epochs: int = 10,
     projected_epochs: int = DEFAULT_CTGAN_EPOCHS,
-    # 30 tuning trials at DEFAULT_CTGAN_TUNING_EPOCHS (50/300 of a full run)
-    # + 5 folds at full epochs ~= 10 full-epoch-equivalent runs.
-    projected_total_runs: int = 10,
+    projected_total_runs: int = 35,
     task_type: Optional[str] = None,
     holdout_cfg: Optional[SplitConfigHoldout] = None,
     discrete_cols: Optional[Sequence[str]] = None,

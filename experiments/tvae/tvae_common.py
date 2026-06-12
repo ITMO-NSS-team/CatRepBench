@@ -3,9 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 DEFAULT_TVAE_EPOCHS = 300
-# Tuning trials only proxy-rank hyperparameters; final fold models still train
-# with DEFAULT_TVAE_EPOCHS.
-DEFAULT_TVAE_TUNING_EPOCHS = 50
 
 
 def _validate_device(device: str) -> str:

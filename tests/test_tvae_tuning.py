@@ -106,7 +106,9 @@ def test_tune_tvae_saves_outputs_and_returns_params(tmp_path, monkeypatch):
     assert "decompress_dims" in DummyTvaeGenerative.created[0].tvae_kwargs
 
 
-def test_tune_tvae_uses_reduced_tuning_epochs_by_default(tmp_path, monkeypatch):
+def test_tune_tvae_uses_full_300_epochs_by_default(tmp_path, monkeypatch):
+    # Tuning budget must match final fold training (DEFAULT_TVAE_EPOCHS):
+    # params selected at a smaller budget would not transfer.
     monkeypatch.setattr(tune_mod, "TvaeGenerative", DummyTvaeGenerative)
     DummyTvaeGenerative.created = []
 
@@ -121,7 +123,7 @@ def test_tune_tvae_uses_reduced_tuning_epochs_by_default(tmp_path, monkeypatch):
     )
 
     assert DummyTvaeGenerative.created
-    assert DummyTvaeGenerative.created[0].tvae_kwargs["epochs"] == 50
+    assert DummyTvaeGenerative.created[0].tvae_kwargs["epochs"] == 300
 
 
 def test_tune_tvae_default_tuning_row_cap_is_20k():
