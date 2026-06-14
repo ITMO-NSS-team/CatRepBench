@@ -119,18 +119,6 @@
       "dataset_id": "openml_adult",
       "target_col": "class",
       "id_col": null
-    },
-    {
-      "label": "Covertype",
-      "dataset_id": "uci_Covertype",
-      "target_col": "Cover_Type",
-      "id_col": null
-    },
-    {
-      "label": "zoo",
-      "dataset_id": "openml_zoo",
-      "target_col": "type",
-      "id_col": null
     }
   ],
   "encodings": [

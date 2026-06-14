@@ -95,7 +95,6 @@ def test_repository_manifest_dataset_order_matches_runtime_heatmap_low_to_high()
         "Seoul_Bike_Sharing_Demand",
         "bank-marketing",
         "adult",
-        "Covertype",
     ]
 
 
@@ -309,7 +308,6 @@ def test_repository_manifest_covers_canonical_datasets_registered_encodings_and_
         "openml_eucalyptus",
         "openml_letter",
         "openml_nursery",
-        "uci_Covertype",
         "uci_Credit_Approval",
         "uci_Forest_Fires",
         "uci_HTRU2",
