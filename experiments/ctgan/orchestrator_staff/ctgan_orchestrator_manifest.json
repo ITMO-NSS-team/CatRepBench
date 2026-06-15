@@ -169,6 +169,22 @@
     {
       "label": "similarity",
       "encoding_id": "similarity_representation"
+    },
+    {
+      "label": "tabrep",
+      "encoding_id": "tabrep_representation"
+    },
+    {
+      "label": "analog-bits",
+      "encoding_id": "analog_bits_representation"
+    },
+    {
+      "label": "dictionary",
+      "encoding_id": "dictionary_representation"
+    },
+    {
+      "label": "drop-categoricals",
+      "encoding_id": "drop_categoricals_representation"
     }
   ]
 }
