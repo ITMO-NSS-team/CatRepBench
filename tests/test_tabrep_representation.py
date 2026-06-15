@@ -65,3 +65,19 @@ def test_state_roundtrip() -> None:
     rep = TabRepRepresentation().fit(df, _schema(df))
     rep2 = TabRepRepresentation.from_state(rep.get_state())
     pd.testing.assert_frame_equal(rep.transform(df), rep2.transform(df))
+
+
+def test_inverse_transform_handles_nonfinite_values_deterministically() -> None:
+    import warnings
+
+    df = _df()
+    rep = TabRepRepresentation().fit(df, _schema(df))
+    cos_col, sin_col = "color__tabrep_cos", "color__tabrep_sin"
+    bad = pd.DataFrame(
+        {cos_col: [np.nan, np.inf, -np.inf, 0.0], sin_col: [np.nan, 0.0, np.nan, np.inf], "x": [1.0, 2.0, 3.0, 4.0]}
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any RuntimeWarning becomes a failure
+        out = rep.inverse_transform(bad)
+    assert list(out["color"]) == [lvl for lvl in out["color"]]  # no NaN/None
+    assert set(out["color"]).issubset(set(df["color"]))         # all valid in-vocab

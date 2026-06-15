@@ -96,8 +96,10 @@ class TabRepRepresentation:
                 continue
             levels = self.vocab_[c]
             k = max(len(levels), 1)
-            cos_v = out[cos_col].to_numpy(dtype=float)
-            sin_v = out[sin_col].to_numpy(dtype=float)
+            # Sanitize non-finite synthetic values (a degenerate generator can
+            # emit NaN/inf) so decoding is deterministic and warning-free.
+            cos_v = np.nan_to_num(out[cos_col].to_numpy(dtype=float))
+            sin_v = np.nan_to_num(out[sin_col].to_numpy(dtype=float))
             ang = np.mod(np.arctan2(sin_v, cos_v), 2.0 * np.pi)  # [0, 2*pi)
             idx = (np.rint(ang / (2.0 * np.pi) * k).astype(int)) % k
             fallback = levels[0] if levels else "__UNK__"

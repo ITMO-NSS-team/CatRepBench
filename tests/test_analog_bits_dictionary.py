@@ -58,3 +58,15 @@ def test_state_roundtrip() -> None:
         rep = cls().fit(df, _schema(df))
         rep2 = cls.from_state(rep.get_state())
         pd.testing.assert_frame_equal(rep.transform(df), rep2.transform(df))
+
+
+def test_dictionary_inverse_transform_handles_nonfinite_deterministically() -> None:
+    import warnings
+
+    df = _df()
+    rep = DictionaryRepresentation().fit(df, _schema(df))
+    bad = pd.DataFrame({"color": [np.nan, np.inf, -np.inf], "x": [1.0, 2.0, 3.0]})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = rep.inverse_transform(bad)
+    assert set(out["color"]).issubset(set(df["color"]))

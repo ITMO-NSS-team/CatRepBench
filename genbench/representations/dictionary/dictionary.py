@@ -84,7 +84,12 @@ class DictionaryRepresentation:
             k = len(levels)
             if k == 0:
                 continue
-            vals = out[c].to_numpy(dtype=float)
+            # Sanitize non-finite synthetic values to the code range [-1, 1] so
+            # the linear map + int cast below is deterministic and warning-free
+            # (nan_to_num's default maps inf to a huge finite that would overflow).
+            vals = np.nan_to_num(
+                out[c].to_numpy(dtype=float), nan=0.0, posinf=1.0, neginf=-1.0
+            )
             if k == 1:
                 idx = np.zeros(len(vals), dtype=int)
             else:
