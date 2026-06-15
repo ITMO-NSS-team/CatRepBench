@@ -322,7 +322,11 @@ def test_repository_manifest_covers_canonical_datasets_registered_encodings_and_
     encoding_ids = {entry.encoding_id for entry in manifest.encodings}
 
     assert dataset_ids == expected_dataset_ids
-    assert encoding_ids == set(list_registered_representations())
+    # The registry is the set of AVAILABLE representations; the manifest grid is
+    # the subset we actually run. New encoders can be registered and tested
+    # before being added to the grid, so the grid must be a subset of (not equal
+    # to) the registry. Every grid encoding must still be a real representation.
+    assert encoding_ids <= set(list_registered_representations())
 
     for entry in manifest.datasets:
         assert entry.csv_path == project_root / "datasets" / "raw" / f"{entry.dataset_id}.csv"
