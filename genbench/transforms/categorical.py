@@ -23,6 +23,12 @@ from genbench.representations.hash.hash import HashRepresentation
 from genbench.representations.gumbel_softmax.gumbel_softmax import GumbelSoftmaxRepresentation
 from genbench.representations.similarity.similarity import SimilarityRepresentation
 from genbench.representations.gel.gel import GELRepresentation
+from genbench.representations.tabrep.tabrep import TabRepRepresentation
+from genbench.representations.analog_bits.analog_bits import AnalogBitsRepresentation
+from genbench.representations.dictionary.dictionary import DictionaryRepresentation
+from genbench.representations.drop_categoricals.drop_categoricals import (
+    DropCategoricalsRepresentation,
+)
 
 
 # Registry for representations usable via this transform.
@@ -40,6 +46,10 @@ _REPRESENTATION_REGISTRY: Dict[str, Type[BaseRepresentation]] = {
     "gumbel_softmax_representation": GumbelSoftmaxRepresentation,
     "similarity_representation": SimilarityRepresentation,
     "gel_representation": GELRepresentation,
+    "tabrep_representation": TabRepRepresentation,
+    "analog_bits_representation": AnalogBitsRepresentation,
+    "dictionary_representation": DictionaryRepresentation,
+    "drop_categoricals_representation": DropCategoricalsRepresentation,
 }
 
 
